@@ -1,0 +1,8 @@
+streamlit
+streamlit-autorefresh
+pandas
+yfinance
+requests
+python-telegram-bot
+telebot
+pyTelegramBotAPI
