@@ -287,7 +287,7 @@ def canavar_teknik_analiz(ticker_name):
 # --- PORTFÖY YÖNETİMİ SIDEBAR ---
 st.sidebar.header("💼 Portföyüm & Takip")
 
-# ⏱️ DİNAMİK VE HER RERUN'DA SIFIRLANAN YENİLEME SAYACI
+# ⏱️ HATA VERMEYEN DİNAMİK YENİLEME SAYACI
 st.sidebar.markdown("---")
 st.sidebar.subheader("⏱️ Canlı Yenileme Sayacı")
 
@@ -296,11 +296,11 @@ components.html(
     f"""
     <div style="font-family: Arial, sans-serif; text-align: center; padding: 10px; background-color: #1a1c23; border-radius: 8px; border: 1px solid #333;">
         <span style="color: #aaa; font-size: 13px;">Sonraki Yenileme:</span>
-        <div id="countdown" style="font-size: 24px; font-weight: bold; color: #00e676; margin-top: 2px;">60 sn</div>
+        <div id="countdown_{reset_key}" style="font-size: 24px; font-weight: bold; color: #00e676; margin-top: 2px;">60 sn</div>
     </div>
     <script>
         var timeLeft = 60;
-        var elem = document.getElementById('countdown');
+        var elem = document.getElementById('countdown_{reset_key}');
         var timerId = setInterval(countdown, 1000);
         function countdown() {{
             if (timeLeft <= 0) {{
@@ -315,7 +315,6 @@ components.html(
     </script>
     """,
     height=80,
-    key=f"timer_{reset_key}",
 )
 
 portfoy = veri_yukle(PORTFOY_DOSYASI, {})
