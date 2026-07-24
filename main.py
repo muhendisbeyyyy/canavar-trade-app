@@ -4,13 +4,14 @@ import os
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
 import yfinance as yf
 
 # ==========================================
-# ⚡ KESİNTİSİZ AUTO-REFRESH (5 DAKİKA = 300.000 MS)
+# ⚡ KESİNTİSİZ AUTO-REFRESH (1 DAKİKA = 60.000 MS)
 # ==========================================
-st_autorefresh(interval=300000, key="canavar_autorefresh")
+st_autorefresh(interval=60000, key="canavar_autorefresh")
 
 st.set_page_config(
     page_title="Canavar AI Trade Terminal",
@@ -218,7 +219,7 @@ def canavar_teknik_analiz(ticker_name):
         ticker = yf.Ticker(f"{ticker_name}.IS")
         df = ticker.history(period="100d", interval="1d")
         if len(df) < 50:
-            return 0
+            return 0, False, 0.0, 50.0
 
         close = df["Close"]
         high = df["High"]
@@ -232,7 +233,8 @@ def canavar_teknik_analiz(ticker_name):
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rs = gain / (loss + 1e-10)
         rsi = 100 - (100 / (1 + rs))
-        if 35 < rsi.iloc[-1] < 65:
+        current_rsi = float(rsi.iloc[-1])
+        if 35 < current_rsi < 65:
             onay += 1
 
         # MACD
@@ -266,13 +268,53 @@ def canavar_teknik_analiz(ticker_name):
         if close.iloc[-1] > close.rolling(10).mean().iloc[-1]:
             onay += 1
 
-        return onay
+        # Günlük Değişim Yüzdesi Hesaplama (Aşırı Isınma Kontrolü İçin)
+        gunluk_degisim = 0.0
+        if len(close) >= 2:
+            onceki_kapanis = float(close.iloc[-2])
+            guncel = float(close.iloc[-1])
+            if onceki_kapanis > 0:
+                gunluk_degisim = ((guncel - onceki_kapanis) / onceki_kapanis) * 100
+
+        # TEPEDEN ALMA / AŞIRI ISINMA KONTROLÜ
+        # Gün içinde %3.5'ten fazla artmış veya RSI 65'i geçmişse riskli
+        asiri_isinma = gunluk_degisim >= 3.5 or current_rsi >= 65.0
+
+        return onay, asiri_isinma, gunluk_degisim, current_rsi
     except:
-        return 0
+        return 0, False, 0.0, 50.0
 
 
 # --- PORTFÖY YÖNETİMİ SIDEBAR ---
 st.sidebar.header("💼 Portföyüm & Takip")
+
+# ⏱️ CANLI GERİ SAYIM SAYACI (HTML / JS)
+st.sidebar.markdown("---")
+st.sidebar.subheader("⏱️ Canlı Yenileme Sayacı")
+components.html(
+    """
+    <div style="font-family: Arial, sans-serif; text-align: center; padding: 10px; background-color: #1a1c23; border-radius: 8px; border: 1px solid #333;">
+        <span style="color: #aaa; font-size: 13px;">Sonraki Yenileme:</span>
+        <div id="countdown" style="font-size: 24px; font-weight: bold; color: #00e676; margin-top: 2px;">60 sn</div>
+    </div>
+    <script>
+        var timeLeft = 60;
+        var elem = document.getElementById('countdown');
+        var timerId = setInterval(countdown, 1000);
+        function countdown() {
+            if (timeLeft == 0) {
+                elem.innerHTML = "Yenileniyor...";
+                elem.style.color = "#ff5252";
+            } else {
+                elem.innerHTML = timeLeft + ' sn';
+                timeLeft--;
+            }
+        }
+    </script>
+    """,
+    height=80,
+)
+
 portfoy = veri_yukle(PORTFOY_DOSYASI, {})
 pik_hafiza = veri_yukle(PIK_DOSYASI, {})
 
@@ -358,10 +400,10 @@ else:
     st.sidebar.write("Portföyünüz henüz boş.")
 
 # --- ANA EKRAN ---
-st.title("🛡️ Canavar AI Trade Terminal v3.2")
+st.title("🛡️ Canavar AI Trade Terminal v3.3")
 st.caption(
-    "⚡ Otomatik Yenileme Aktif (5 Dk) | 🎯 Pik Seviye & Trailing Stop Koruma"
-    " Aktif"
+    "⚡ Otomatik Yenileme Aktif (1 Dk) | 🎯 Pik Seviye & Trailing Stop Koruma"
+    " | 🛑 Tepeden Alma Filtresi"
 )
 
 t1, t2, t3 = st.tabs(
@@ -376,7 +418,7 @@ with t1:
 
     for h in portfoy.keys():
         fiyat = guncel_fiyat_bul(h)
-        tech = canavar_teknik_analiz(h)
+        tech, asiri_isinma, degisim, current_rsi = canavar_teknik_analiz(h)
         ai = yapay_zeka_haber_analizi(h)
         bilesik = tech + ai
 
@@ -464,17 +506,29 @@ with t1:
             if not fiyat:
                 continue
 
-            tech = canavar_teknik_analiz(h)
+            tech, asiri_isinma, degisim, current_rsi = canavar_teknik_analiz(h)
             if tech >= 4:
                 ai = yapay_zeka_haber_analizi(h)
                 bilesik = tech + ai
+
+                # 🛑 TEPEDEN ALMA / AŞIRI ISINMA ENGELLEYİCİ MANTIK
+                if asiri_isinma:
+                    durum_notu = f"🔥 AŞIRI ISINDI (Günlük: %{degisim:+.2f} | RSI: {current_rsi:.1f})"
+                elif bilesik >= 7:
+                    durum_notu = "🟢 CANAVAR RALLİ FIRSATI"
+                else:
+                    durum_notu = "🟡 NÖTR / TAKİP"
+
                 if bilesik >= 7:
                     firsatlar.append({
                         "Hisse": h,
                         "Güncel Fiyat": f"{fiyat:.2f} TL",
+                        "Günlük Değişim": f"%{degisim:+.2f}",
+                        "RSI Değeri": f"{current_rsi:.1f}",
                         "Teknik Onay": f"{tech}/8",
                         "AI Haber Gücü": f"{ai:+.0f}",
                         "Toplam Skor": bilesik,
+                        "ALIM DURUMU": durum_notu,
                     })
 
         tarama_bar.empty()
@@ -483,11 +537,16 @@ with t1:
                 f"🔥 Yapay Zeka ve Teknik Filtreleri Aşan {len(firsatlar)} Hisse"
                 " Bulundu!"
             )
-            st.dataframe(
-                pd.DataFrame(firsatlar).sort_values(
-                    by="Toplam Skor", ascending=False
-                )
+            df_firsat = pd.DataFrame(firsatlar)
+            # Aşırı ısınan tepe hisselerini tablonun altına itin
+            df_firsat["Isinma_Sira"] = df_firsat["ALIM DURUMU"].apply(
+                lambda x: 1 if "🔥 AŞIRI ISINDI" in x else 0
             )
+            df_firsat = df_firsat.sort_values(
+                by=["Isinma_Sira", "Toplam Skor"], ascending=[True, False]
+            ).drop(columns=["Isinma_Sira"])
+
+            st.dataframe(df_firsat)
         else:
             st.warning("Kriterlere uyan yeni bir ralli fırsatı tespit edilemedi.")
 
