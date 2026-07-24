@@ -287,36 +287,6 @@ def canavar_teknik_analiz(ticker_name):
 # --- PORTFÖY YÖNETİMİ SIDEBAR ---
 st.sidebar.header("💼 Portföyüm & Takip")
 
-# ⏱️ HATA VERMEYEN DİNAMİK YENİLEME SAYACI
-st.sidebar.markdown("---")
-st.sidebar.subheader("⏱️ Canlı Yenileme Sayacı")
-
-reset_key = datetime.now().strftime("%Y%m%d%H%M%S")
-components.html(
-    f"""
-    <div style="font-family: Arial, sans-serif; text-align: center; padding: 10px; background-color: #1a1c23; border-radius: 8px; border: 1px solid #333;">
-        <span style="color: #aaa; font-size: 13px;">Sonraki Yenileme:</span>
-        <div id="countdown_{reset_key}" style="font-size: 24px; font-weight: bold; color: #00e676; margin-top: 2px;">60 sn</div>
-    </div>
-    <script>
-        var timeLeft = 60;
-        var elem = document.getElementById('countdown_{reset_key}');
-        var timerId = setInterval(countdown, 1000);
-        function countdown() {{
-            if (timeLeft <= 0) {{
-                elem.innerHTML = "Yenileniyor...";
-                elem.style.color = "#ff5252";
-                clearInterval(timerId);
-            }} else {{
-                elem.innerHTML = timeLeft + ' sn';
-                timeLeft--;
-            }}
-        }}
-    </script>
-    """,
-    height=80,
-)
-
 portfoy = veri_yukle(PORTFOY_DOSYASI, {})
 pik_hafiza = veri_yukle(PIK_DOSYASI, {})
 
@@ -403,10 +373,43 @@ else:
 
 # --- ANA EKRAN ---
 st.title("🛡️ Canavar AI Trade Terminal v3.3")
-st.caption(
-    "⚡ Otomatik Yenileme Aktif (1 Dk) | 🎯 Pik Seviye & Trailing Stop Koruma"
-    " | 🛑 Tepeden Alma Filtresi"
-)
+
+# ⏱️ BAŞLIK ALTINDAKİ SATIR VE MİNİMAL CANLI SAYACIN YERİ
+reset_key = datetime.now().strftime("%Y%m%d%H%M%S")
+
+col_sub1, col_sub2 = st.columns([0.82, 0.18])
+
+with col_sub1:
+    st.caption(
+        "⚡ Otomatik Yenileme Aktif (1 Dk) | 🎯 Pik Seviye & Trailing Stop Koruma"
+        " | 🛑 Tepeden Alma Filtresi"
+    )
+
+with col_sub2:
+    components.html(
+        f"""
+        <div style="font-family: Arial, sans-serif; display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 0; margin-top: -5px;">
+            <span style="color: #888; font-size: 11px; white-space: nowrap;">Sonraki Yenileme:</span>
+            <span id="countdown_{reset_key}" style="font-size: 13px; font-weight: bold; color: #00e676; background: #1f232a; padding: 2px 8px; border-radius: 4px; border: 1px solid #333;">60s</span>
+        </div>
+        <script>
+            var timeLeft = 60;
+            var elem = document.getElementById('countdown_{reset_key}');
+            var timerId = setInterval(countdown, 1000);
+            function countdown() {{
+                if (timeLeft <= 0) {{
+                    elem.innerHTML = "Yenileniyor...";
+                    elem.style.color = "#ff5252";
+                    clearInterval(timerId);
+                }} else {{
+                    elem.innerHTML = timeLeft + 's';
+                    timeLeft--;
+                }}
+            }}
+        </script>
+        """,
+        height=32,
+    )
 
 t1, t2, t3 = st.tabs(
     ["🚀 Canavar AI Hibrit Süzgeç", "📖 Temel Analiz Defteri", "🚨 Akıllı Alarmlar"]
