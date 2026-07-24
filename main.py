@@ -41,14 +41,9 @@ def telegram_bildirim_gonder(mesaj):
 
 
 # ==========================================
-# 🎯 PİK FİYAT & BİLDİRİM HAFIZASI
+# 🎯 PİK FİYAT & BİLDİRİM KALICI HAFIZASI (JSON)
 # ==========================================
-if "peak_prices" not in st.session_state:
-    st.session_state.peak_prices = {}
-
-if "notified_stocks" not in st.session_state:
-    st.session_state.notified_stocks = {}
-
+PIK_DOSYASI = "pik_fiyatlar.json"
 PORTFOY_DOSYASI = "portfoy_data.json"
 ALARMLAR_DOSYASI = "alarmlar_data.json"
 
@@ -147,6 +142,10 @@ def veri_yukle(dosya_adi, varsayilan):
 def veri_kaydet(dosya_adi, veri):
     with open(dosya_adi, "w", encoding="utf-8") as f:
         json.dump(veri, f, ensure_ascii=False, indent=4)
+
+
+if "notified_stocks" not in st.session_state:
+    st.session_state.notified_stocks = {}
 
 
 # 🛡️ GÜVENLİ FİYAT ÇEKME FONKSİYONU
@@ -275,6 +274,7 @@ def canavar_teknik_analiz(ticker_name):
 # --- PORTFÖY YÖNETİMİ SIDEBAR ---
 st.sidebar.header("💼 Portföyüm & Takip")
 portfoy = veri_yukle(PORTFOY_DOSYASI, {})
+pik_hafiza = veri_yukle(PIK_DOSYASI, {})
 
 with st.sidebar.expander("➕ Portföye Hisse Ekle"):
     yeni_hisse = st.selectbox("Hisse Seç", BIST_OTOMATIK_HAVUZ)
@@ -293,6 +293,9 @@ with st.sidebar.expander("🗑️ Portföyden Hisse Sil"):
         silinecek = st.selectbox("Silinecek Hisse", list(portfoy.keys()))
         if st.button("Portföyden Çıkar"):
             del portfoy[silinecek]
+            if silinecek in pik_hafiza:
+                del pik_hafiza[silinecek]
+                veri_kaydet(PIK_DOSYASI, pik_hafiza)
             veri_kaydet(PORTFOY_DOSYASI, portfoy)
             st.warning(f"{silinecek} silindi.")
             st.rerun()
@@ -380,23 +383,23 @@ with t1:
         fiyat_b = fiyat if fiyat is not None else float(portfoy[h]["maliyet"])
         fiyat_str = f"{fiyat_b:.2f}"
 
-        # 🎯 PİK FİYAT GÜNCELLEME
-        if (
-            h not in st.session_state.peak_prices
-            or fiyat_b > st.session_state.peak_prices[h]
-        ):
-            st.session_state.peak_prices[h] = fiyat_b
+        # 🎯 KALICI PİK FİYAT GÜNCELLEME (JSON)
+        mevcut_pik = pik_hafiza.get(h, fiyat_b)
+        if fiyat_b > mevcut_pik or h not in pik_hafiza:
+            mevcut_pik = fiyat_b
+            pik_hafiza[h] = mevcut_pik
+            veri_kaydet(PIK_DOSYASI, pik_hafiza)
             st.session_state.notified_stocks[h] = False
 
-        zirve_fiyat = st.session_state.peak_prices[h]
+        zirve_fiyat = pik_hafiza.get(h, fiyat_b)
         dusus_yuzdesi = (
             ((zirve_fiyat - fiyat_b) / zirve_fiyat) * 100
             if zirve_fiyat > 0
             else 0.0
         )
 
-        # 🚨 %1.5 DÜŞÜŞ VEYA SKOR DÜŞÜKLÜĞÜ KONTROLÜ
-        if dusus_yuzdesi >= 1.5 and bilesik < 6:
+        # 🚨 SERT SİNYAL MANTIĞI: DÜŞÜŞ %1.5 VE ÜZERİYSE DOĞRUDAN SAT!
+        if dusus_yuzdesi >= 1.5:
             sinyal = "🚨 SAT / PİK DÖNÜŞÜ"
             mesaj_metni = f"🚨 **CANAVAR AI PİK SAT UYARISI!**\n\n📌 **Hisse:** {h}\n💰 **Güncel Fiyat:** {fiyat_b:.2f} TL\n🔝 **Gördüğü Zirve:** {zirve_fiyat:.2f} TL\n📉 **Zirveden Düşüş:** %{dusus_yuzdesi:.2f}\n📊 **Birleşik Skor:** {bilesik}\n\n⚠️ Kârı korumak için satışı değerlendir!"
 
@@ -409,7 +412,7 @@ with t1:
                 telegram_bildirim_gonder(mesaj_metni)
                 st.session_state.notified_stocks[h] = True
 
-        elif bilesik >= 6:
+        elif bilesik >= 7:
             sinyal = "🟢 CANAVAR AL"
         elif bilesik >= 4:
             sinyal = "🟡 NÖTR / BEKLE"
@@ -465,7 +468,7 @@ with t1:
             if tech >= 4:
                 ai = yapay_zeka_haber_analizi(h)
                 bilesik = tech + ai
-                if bilesik >= 6:
+                if bilesik >= 7:
                     firsatlar.append({
                         "Hisse": h,
                         "Güncel Fiyat": f"{fiyat:.2f} TL",
