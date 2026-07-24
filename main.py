@@ -284,6 +284,62 @@ def canavar_teknik_analiz(ticker_name):
         return 0, False, 0.0, 50.0
 
 
+# 💎 DİP AVCISI / SIKIŞAN PATLAMA ADAYLARI ANALİZİ
+def dip_avcisi_analizi(ticker_name):
+    try:
+        ticker = yf.Ticker(f"{ticker_name}.IS")
+        df = ticker.history(period="100d", interval="1d")
+        if len(df) < 50:
+            return False, 0, 0.0, 50.0
+
+        close = df["Close"]
+        volume = df["Volume"]
+
+        # RSI Hesaplama
+        delta = close.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / (loss + 1e-10)
+        rsi = 100 - (100 / (1 + rs))
+        current_rsi = float(rsi.iloc[-1])
+
+        # Bollinger Band Genişliği (Sıkışma Kontrolü)
+        sma20 = close.rolling(20).mean()
+        std20 = close.rolling(20).std()
+        upper_band = sma20 + (std20 * 2)
+        lower_band = sma20 - (std20 * 2)
+        band_width = ((upper_band - lower_band) / sma20).iloc[-1]
+
+        # Değişim
+        gunluk_degisim = 0.0
+        if len(close) >= 2:
+            gunluk_degisim = (
+                (close.iloc[-1] - close.iloc[-2]) / close.iloc[-2]
+            ) * 100
+
+        dip_skor = 0
+        # 1. RSI Ucuz/Dip Seviyede mi?
+        if 30 <= current_rsi <= 48:
+            dip_skor += 2
+        # 2. Bollinger Band İyice Sıkışmış mı? (Patlama Öncesi Sessizlik)
+        if band_width < 0.10:
+            dip_skor += 2
+        # 3. Sessizce Hacim Toplanıyor mu?
+        if volume.iloc[-1] > volume.rolling(10).mean().iloc[-1]:
+            dip_skor += 1
+        # 4. Fiyat 50 Günlük Desteğe Yakın mı?
+        sma50 = close.rolling(50).mean().iloc[-1]
+        if abs(close.iloc[-1] - sma50) / sma50 < 0.03:
+            dip_skor += 1
+
+        # Eğer dip skoru 3 ve üzerindeyse patlama adayıdır
+        is_dip_candidate = dip_skor >= 3
+
+        return is_dip_candidate, dip_skor, gunluk_degisim, current_rsi
+    except:
+        return False, 0, 0.0, 50.0
+
+
 # --- PORTFÖY YÖNETİMİ SIDEBAR ---
 st.sidebar.header("💼 Portföyüm & Takip")
 
@@ -494,11 +550,17 @@ with t1:
         st.info("Portföyünüzde hisse bulunmadığı için analiz yapılamadı.")
 
     st.markdown("---")
-    st.header(
-        "🔥 BIST 75 Havuzunda Yapay Zeka ve Teknik Onaylı Ralli Fırsatları"
-    )
+    st.header("🔥 BIST 75 Yapay Zeka & Teknik Tarama Laboratuvarı")
 
-    if st.button("🔥 75 HİSSEYİ YAPAY ZEKAYLA BİRLİKTE TARA"):
+    # İKİ FARKLI TARAMA SEÇENEĞİ BUTONLARI
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        tara_ralli = st.button("🚀 1. Trend & Ralli Fırsatlarını Tara")
+    with col_btn2:
+        tara_dip = st.button("💎 2. Dipte Sıkışan Patlama Adaylarını Tara")
+
+    # 🚀 RALLİ TARAMASI
+    if tara_ralli:
         tarama_bar = st.progress(0)
         firsatlar = []
 
@@ -516,7 +578,6 @@ with t1:
                 ai = yapay_zeka_haber_analizi(h)
                 bilesik = tech + ai
 
-                # 🛑 TEPEDEN ALMA / AŞIRI ISINMA ENGELLEYİCİ MANTIK
                 if asiri_isinma:
                     durum_notu = f"🔥 AŞIRI ISINDI (Günlük: %{degisim:+.2f} | RSI: {current_rsi:.1f})"
                 elif bilesik >= 7:
@@ -539,11 +600,10 @@ with t1:
         tarama_bar.empty()
         if firsatlar:
             st.success(
-                f"🔥 Yapay Zeka ve Teknik Filtreleri Aşan {len(firsatlar)} Hisse"
-                " Bulundu!"
+                f"🚀 Yapay Zeka ve Trend Filtrelerini Aşan {len(firsatlar)}"
+                " Hisse Bulundu!"
             )
             df_firsat = pd.DataFrame(firsatlar)
-            # Aşırı ısınan tepe hisselerini tablonun altına itin
             df_firsat["Isinma_Sira"] = df_firsat["ALIM DURUMU"].apply(
                 lambda x: 1 if "🔥 AŞIRI ISINDI" in x else 0
             )
@@ -554,6 +614,47 @@ with t1:
             st.dataframe(df_firsat)
         else:
             st.warning("Kriterlere uyan yeni bir ralli fırsatı tespit edilemedi.")
+
+    # 💎 DİP AVCISI TARAMASI
+    if tara_dip:
+        tarama_bar_dip = st.progress(0)
+        dip_firsatlari = []
+
+        for index, h in enumerate(BIST_OTOMATIK_HAVUZ):
+            tarama_bar_dip.progress((index + 1) / len(BIST_OTOMATIK_HAVUZ))
+            if h in portfoy:
+                continue
+
+            fiyat = guncel_fiyat_bul(h)
+            if not fiyat:
+                continue
+
+            is_candidate, dip_skor, degisim, current_rsi = dip_avcisi_analizi(h)
+
+            if is_candidate:
+                ai = yapay_zeka_haber_analizi(h)
+                dip_firsatlari.append({
+                    "Hisse": h,
+                    "Güncel Fiyat": f"{fiyat:.2f} TL",
+                    "Günlük Değişim": f"%{degisim:+.2f}",
+                    "RSI Değeri (Ucuzluk)": f"{current_rsi:.1f}",
+                    "Sıkışma & Dip Skoru": f"{dip_skor}/6",
+                    "AI Haber Gücü": f"{ai:+.0f}",
+                    "POTANSİYEL DURUMU": "💎 PATLAMA ADAYI / DİP SIKIŞMASI",
+                })
+
+        tarama_bar_dip.empty()
+        if dip_firsatlari:
+            st.success(
+                f"💎 Dipte Sıkışmış ve Pik Yapmaya Hazır {len(dip_firsatlari)}"
+                " Potansiyel Hisse Bulundu!"
+            )
+            df_dip = pd.DataFrame(dip_firsatlari).sort_values(
+                by="Sıkışma & Dip Skoru", ascending=False
+            )
+            st.dataframe(df_dip)
+        else:
+            st.warning("Şu anda dip bölgesinde dilleşen hisse tespiti yapılamadı.")
 
 with t2:
     st.subheader("📖 Şirket Temel Analiz Defteri")
