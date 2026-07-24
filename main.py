@@ -268,7 +268,7 @@ def canavar_teknik_analiz(ticker_name):
         if close.iloc[-1] > close.rolling(10).mean().iloc[-1]:
             onay += 1
 
-        # Günlük Değişim Yüzdesi Hesaplama (Aşırı Isınma Kontrolü İçin)
+        # Günlük Değişim Yüzdesi Hesaplama
         gunluk_degisim = 0.0
         if len(close) >= 2:
             onceki_kapanis = float(close.iloc[-2])
@@ -277,7 +277,6 @@ def canavar_teknik_analiz(ticker_name):
                 gunluk_degisim = ((guncel - onceki_kapanis) / onceki_kapanis) * 100
 
         # TEPEDEN ALMA / AŞIRI ISINMA KONTROLÜ
-        # Gün içinde %3.5'ten fazla artmış veya RSI 65'i geçmişse riskli
         asiri_isinma = gunluk_degisim >= 3.5 or current_rsi >= 65.0
 
         return onay, asiri_isinma, gunluk_degisim, current_rsi
@@ -288,11 +287,13 @@ def canavar_teknik_analiz(ticker_name):
 # --- PORTFÖY YÖNETİMİ SIDEBAR ---
 st.sidebar.header("💼 Portföyüm & Takip")
 
-# ⏱️ CANLI GERİ SAYIM SAYACI (HTML / JS)
+# ⏱️ DİNAMİK VE HER RERUN'DA SIFIRLANAN YENİLEME SAYACI
 st.sidebar.markdown("---")
 st.sidebar.subheader("⏱️ Canlı Yenileme Sayacı")
+
+reset_key = datetime.now().strftime("%Y%m%d%H%M%S")
 components.html(
-    """
+    f"""
     <div style="font-family: Arial, sans-serif; text-align: center; padding: 10px; background-color: #1a1c23; border-radius: 8px; border: 1px solid #333;">
         <span style="color: #aaa; font-size: 13px;">Sonraki Yenileme:</span>
         <div id="countdown" style="font-size: 24px; font-weight: bold; color: #00e676; margin-top: 2px;">60 sn</div>
@@ -301,18 +302,20 @@ components.html(
         var timeLeft = 60;
         var elem = document.getElementById('countdown');
         var timerId = setInterval(countdown, 1000);
-        function countdown() {
-            if (timeLeft == 0) {
+        function countdown() {{
+            if (timeLeft <= 0) {{
                 elem.innerHTML = "Yenileniyor...";
                 elem.style.color = "#ff5252";
-            } else {
+                clearInterval(timerId);
+            }} else {{
                 elem.innerHTML = timeLeft + ' sn';
                 timeLeft--;
-            }
-        }
+            }}
+        }}
     </script>
     """,
     height=80,
+    key=f"timer_{reset_key}",
 )
 
 portfoy = veri_yukle(PORTFOY_DOSYASI, {})
