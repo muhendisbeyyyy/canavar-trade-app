@@ -1155,6 +1155,101 @@ def alarmlari_kontrol_et() -> List[str]:
     return tetiklenenler
 
 
+# -------------------------
+# Portföy planı ve pozisyon takip yardımcıları
+# -------------------------
+def portfoy_plan_anlik_goruntu(hisse: str, maliyet: float) -> Dict[str, Any]:
+    """Hisse portföye eklenirken o andaki işlem planını sabit bir kayıt olarak saklar."""
+    plan = islem_plani_hesapla(hisse)
+    if plan is None:
+        return {
+            "alis_tarihi": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "ilk_stop": round(float(maliyet) * 0.94, 2),
+            "hedef_1": round(float(maliyet) * 1.08, 2),
+            "hedef_2": round(float(maliyet) * 1.15, 2),
+            "atr": round(float(maliyet) * 0.025, 2),
+            "plan_kaynagi": "Yedek yüzde planı",
+        }
+    return {
+        "alis_tarihi": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "ilk_stop": float(plan.stop),
+        "hedef_1": float(plan.hedef_1),
+        "hedef_2": float(plan.hedef_2),
+        "atr": float(plan.atr),
+        "plan_kaynagi": "Teknik işlem planı",
+        "ilk_kalite": int(plan.sinyal_guveni),
+        "ilk_asama": str(plan.asama),
+    }
+
+
+def portfoy_kaydini_tamamla(hisse: str, bilgi: Dict[str, Any]) -> Dict[str, Any]:
+    """Eski portföy kayıtlarını yeni takip alanlarıyla geriye uyumlu biçimde tamamlar."""
+    sonuc = dict(bilgi)
+    maliyet = float(sonuc.get("maliyet", 0) or 0)
+    gerekli = {"alis_tarihi", "ilk_stop", "hedef_1", "hedef_2", "atr"}
+    if not gerekli.issubset(sonuc):
+        sonuc.update(portfoy_plan_anlik_goruntu(hisse, maliyet))
+    return sonuc
+
+
+def pozisyon_durumu_hesapla(
+    fiyat: float, maliyet: float, pik: float, ilk_stop: float,
+    hedef_1: float, hedef_2: float, atr: float
+) -> Dict[str, Any]:
+    """Pozisyonun hangi aşamada olduğunu ve uygulanabilir yönetim mesajını üretir."""
+    kar_pct = 100 * (fiyat / max(maliyet, 1e-9) - 1)
+    h1_ilerleme = 100 * (fiyat - maliyet) / max(hedef_1 - maliyet, 1e-9)
+
+    # Kâr arttıkça stop maliyete ve son pike doğru yükselir.
+    if pik >= hedef_2:
+        dinamik_stop = max(ilk_stop, maliyet, pik - 1.15 * atr)
+    elif pik >= hedef_1:
+        dinamik_stop = max(ilk_stop, maliyet, pik - 1.45 * atr)
+    elif kar_pct >= 4:
+        dinamik_stop = max(ilk_stop, maliyet * 0.995, pik - 1.85 * atr)
+    else:
+        dinamik_stop = max(ilk_stop, pik - 2.20 * atr)
+    dinamik_stop = round(min(dinamik_stop, fiyat * 0.999) if fiyat > dinamik_stop else dinamik_stop, 2)
+
+    if fiyat <= ilk_stop:
+        asama = "🔴 ZARAR KES SEVİYESİ"
+        eylem = "Başlangıç stopu ihlal edildi. Pozisyonu kapatmayı veya riski derhâl azaltmayı değerlendir."
+        oncelik = 5
+    elif fiyat <= dinamik_stop and kar_pct > 0:
+        asama = "🚨 KÂR KORUMA TETİKLENDİ"
+        eylem = "Dinamik stop çalıştı. Kazancı korumak için çıkış veya önemli ölçüde azaltma değerlendirilebilir."
+        oncelik = 5
+    elif pik >= hedef_2:
+        asama = "🟣 İKİNCİ HEDEF GÖRÜLDÜ"
+        eylem = "Ana hedef gerçekleşti. Kalan pozisyonda stopu sıkılaştır ve kârın büyük bölümünü koru."
+        oncelik = 4
+    elif pik >= hedef_1:
+        asama = "🟢 İLK HEDEF GÖRÜLDÜ"
+        eylem = "Pozisyonun bir kısmında kâr realizasyonu; kalan bölümde stopu en az maliyete çekme değerlendirilebilir."
+        oncelik = 3
+    elif h1_ilerleme >= 70:
+        asama = "🟢 İLK HEDEFE YAKIN"
+        eylem = "İlk hedefe yaklaşılmış durumda. Yeni alım yerine mevcut pozisyonu ve dinamik stopu yönet."
+        oncelik = 2
+    elif kar_pct >= 2:
+        asama = "🔵 POZİTİF İLERLEME"
+        eylem = "Pozisyon kârda ve plan içinde. Stop seviyesini takip ederek taşınabilir."
+        oncelik = 1
+    elif kar_pct > -2:
+        asama = "🟡 ALIM / BEKLEME BÖLGESİ"
+        eylem = "Fiyat maliyet çevresinde. İlk plan bozulmadıkça sabırlı takip; plansız ek alımdan kaçın."
+        oncelik = 1
+    else:
+        asama = "🟠 STOPA YAKLAŞIYOR"
+        eylem = "Pozisyon zararda. Başlangıç stopuna kalan mesafeyi izle ve riski büyütme."
+        oncelik = 2
+
+    return {
+        "asama": asama, "eylem": eylem, "dinamik_stop": dinamik_stop,
+        "kar_yuzde": round(kar_pct, 2), "hedef1_ilerleme": round(max(0, min(100, h1_ilerleme)), 1),
+        "oncelik": oncelik,
+    }
+
 # =========================================================
 # ARAYÜZ
 # =========================================================
@@ -1171,7 +1266,9 @@ with st.sidebar.expander("➕ Portföye Hisse Ekle"):
     adet = st.number_input("Adet", min_value=1, step=1, value=100)
     maliyet = st.number_input("Maliyet (TL)", min_value=0.01, step=0.05, value=10.0)
     if st.button("Portföye kaydet", use_container_width=True):
-        portfoy[yeni_hisse] = {"adet": int(adet), "maliyet": float(maliyet)}
+        yeni_kayit = {"adet": int(adet), "maliyet": float(maliyet)}
+        yeni_kayit.update(portfoy_plan_anlik_goruntu(yeni_hisse, float(maliyet)))
+        portfoy[yeni_hisse] = yeni_kayit
         veri_kaydet(PORTFOY_DOSYASI, portfoy)
         st.success(f"{yeni_hisse} eklendi")
         st.rerun()
@@ -1538,72 +1635,100 @@ with t1:
         st.info("Tarama kapsamını seçip butona basın. Günlük kullanım için Hızlı mod önerilir.")
 
 with t2:
-    st.header("💼 Portföy Kâr Koruma ve Çıkış Yönetimi")
+    st.header("💼 Portföy Pozisyon Takibi")
+    st.caption("Hisse portföye eklendiği andaki hedef ve stop planı sabitlenir. Sistem daha sonra fiyatı bu plana göre izler ve kâr koruma seviyesini dinamik olarak yükseltir.")
     if not portfoy:
-        st.info("Önce yan menüden portföye hisse ekleyin.")
+        st.info("Önce yan menüden portföye hisse ekleyin. Alış fiyatını gerçek ortalama maliyetiniz olarak girin.")
     else:
         sat_uyarilari = []
         satirlar = []
-        for h, bilgi in portfoy.items():
-            plan = islem_plani_hesapla(h)
+        degisti = False
+        for h, ham_bilgi in list(portfoy.items()):
+            bilgi = portfoy_kaydini_tamamla(h, ham_bilgi)
+            if bilgi != ham_bilgi:
+                portfoy[h] = bilgi
+                degisti = True
+
             fiyat = guncel_fiyat_bul(h)
-            if plan is None or fiyat is None:
+            if fiyat is None:
                 continue
-            eski_pik = float(pik_hafiza.get(h, fiyat))
+            maliyet = float(bilgi["maliyet"])
+            eski_pik = float(pik_hafiza.get(h, max(maliyet, fiyat)))
             pik = max(eski_pik, fiyat)
             pik_hafiza[h] = pik
-            dinamik_stop = dinamik_trailing_stop(plan, pik, fiyat)
-            pikten_dusus = 100 * (pik - fiyat) / pik if pik else 0
-            hedef1_gecti = pik >= plan.hedef_1
-            hedef2_gecti = pik >= plan.hedef_2
-            if fiyat <= dinamik_stop:
-                sinyal = "🚨 SAT / KÂRI KORU"
-                sat_uyarilari.append(f"{h}: {fiyat:.2f} TL, dinamik stop {dinamik_stop:.2f} TL")
-                anahtar = f"{h}-{dinamik_stop:.2f}"
+
+            takip = pozisyon_durumu_hesapla(
+                fiyat=fiyat, maliyet=maliyet, pik=pik,
+                ilk_stop=float(bilgi["ilk_stop"]),
+                hedef_1=float(bilgi["hedef_1"]),
+                hedef_2=float(bilgi["hedef_2"]),
+                atr=float(bilgi["atr"]),
+            )
+
+            if takip["oncelik"] >= 5:
+                mesaj = f"{h}: {takip['asama']} | Güncel {fiyat:.2f} TL | İzlenen stop {takip['dinamik_stop']:.2f} TL"
+                sat_uyarilari.append(mesaj)
+                anahtar = f"portfoy-{h}-{takip['asama']}-{takip['dinamik_stop']:.2f}"
                 if not st.session_state.notified_stocks.get(anahtar):
-                    bildirim_ekle("SAT", f"{h} kâr koruma", f"Güncel {fiyat:.2f} TL, pik {pik:.2f} TL, dinamik stop {dinamik_stop:.2f} TL", anahtar)
+                    bildirim_ekle("PORTFÖY", f"{h} pozisyon uyarısı", mesaj, anahtar)
                     st.session_state.notified_stocks[anahtar] = True
-            elif hedef2_gecti:
-                sinyal = "🟣 HEDEF 2 GÖRÜLDÜ / STOP SIKILAŞTIR"
-            elif hedef1_gecti:
-                sinyal = "🟢 HEDEF 1 GÖRÜLDÜ / KISMİ KÂR"
-            else:
-                sinyal = "🟡 POZİSYONU İZLE"
-            kar_pct = 100 * (fiyat / float(bilgi["maliyet"]) - 1)
-            if fiyat <= dinamik_stop:
-                asistan = "Satış/kâr koruma seviyesi tetiklendi"
-            elif hedef2_gecti:
-                asistan = "Hedef 2 görüldü; stopu sıkılaştır"
-            elif hedef1_gecti:
-                asistan = "İlk hedef görüldü; kısmi kâr düşünülebilir"
-            elif kar_pct >= 5:
-                asistan = "Kâr var; dinamik stopla taşınabilir"
-            elif kar_pct <= -plan.risk_yuzde:
-                asistan = "Zarar stop sınırına yaklaştı"
-            else:
-                asistan = "Pozisyonu izle"
+
             satirlar.append({
                 "Hisse": h,
-                "Güncel": f"{fiyat:.2f}",
-                "Maliyet": f"{float(bilgi['maliyet']):.2f}",
-                "Pik": f"{pik:.2f}",
-                "Pikten Düşüş": f"%{pikten_dusus:.2f}",
-                "Hedef 1": f"{plan.hedef_1:.2f}",
-                "Hedef 2": f"{plan.hedef_2:.2f}",
-                "Dinamik Stop": f"{dinamik_stop:.2f}",
-                "Asistan Yorumu": asistan,
-                "Sinyal": sinyal,
+                "Aşama": takip["asama"],
+                "Güncel": f"{fiyat:.2f} TL",
+                "Maliyet": f"{maliyet:.2f} TL",
+                "K/Z": f"%{takip['kar_yuzde']:+.2f}",
+                "Hedef 1": f"{float(bilgi['hedef_1']):.2f} TL",
+                "Hedef 1 ilerleme": f"%{takip['hedef1_ilerleme']:.0f}",
+                "Hedef 2": f"{float(bilgi['hedef_2']):.2f} TL",
+                "Başlangıç stop": f"{float(bilgi['ilk_stop']):.2f} TL",
+                "İzlenen stop": f"{takip['dinamik_stop']:.2f} TL",
+                "Alış tarihi": bilgi.get("alis_tarihi", "-"),
+                "Yönetim önerisi": takip["eylem"],
             })
+
+        if degisti:
+            veri_kaydet(PORTFOY_DOSYASI, portfoy)
         veri_kaydet(PIK_DOSYASI, pik_hafiza)
+
         for u in sat_uyarilari:
             st.error(u)
+
         if satirlar:
-            st.dataframe(pd.DataFrame(satirlar), use_container_width=True, hide_index=True)
-        if st.button("Portföy piklerini güncel fiyata sıfırla"):
-            yeni_pikler = {h: (guncel_fiyat_bul(h) or float(portfoy[h]["maliyet"])) for h in portfoy}
-            veri_kaydet(PIK_DOSYASI, yeni_pikler)
-            st.success("Pikler sıfırlandı")
-            st.rerun()
+            tablo = pd.DataFrame(satirlar)
+            st.dataframe(tablo, use_container_width=True, hide_index=True)
+
+            st.subheader("Pozisyon ayrıntısı")
+            secili_hisse = st.selectbox("İncelenecek pozisyon", [x["Hisse"] for x in satirlar], key="portfoy_detay_hisse")
+            detay = next(x for x in satirlar if x["Hisse"] == secili_hisse)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Pozisyon durumu", detay["Aşama"])
+            c2.metric("Güncel K/Z", detay["K/Z"])
+            c3.metric("İlk hedef", detay["Hedef 1"])
+            c4.metric("İzlenen stop", detay["İzlenen stop"])
+            st.info(detay["Yönetim önerisi"])
+            st.progress(int(float(detay["Hedef 1 ilerleme"].replace("%", ""))) / 100)
+            st.caption(f"İlk hedefe ilerleme: {detay['Hedef 1 ilerleme']} | Alış tarihi: {detay['Alış tarihi']}")
+
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            if st.button("Portföy piklerini güncel fiyata sıfırla", use_container_width=True):
+                yeni_pikler = {h: (guncel_fiyat_bul(h) or float(portfoy[h]["maliyet"])) for h in portfoy}
+                veri_kaydet(PIK_DOSYASI, yeni_pikler)
+                st.success("Pikler güncel fiyatlara sıfırlandı.")
+                st.rerun()
+        with bc2:
+            if st.button("Seçili hissenin planını yeniden oluştur", use_container_width=True, disabled=not bool(satirlar)):
+                h = secili_hisse
+                temel = {"adet": portfoy[h]["adet"], "maliyet": portfoy[h]["maliyet"]}
+                temel.update(portfoy_plan_anlik_goruntu(h, float(portfoy[h]["maliyet"])))
+                portfoy[h] = temel
+                veri_kaydet(PORTFOY_DOSYASI, portfoy)
+                pik_hafiza[h] = guncel_fiyat_bul(h) or float(portfoy[h]["maliyet"])
+                veri_kaydet(PIK_DOSYASI, pik_hafiza)
+                st.success(f"{h} için hedef ve stop planı yeniden oluşturuldu.")
+                st.rerun()
 
 with t3:
     st.header("🧪 Geçmiş Veri Backtest")
