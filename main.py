@@ -18,18 +18,22 @@ from streamlit_autorefresh import st_autorefresh
 import yfinance as yf
 
 # =========================================================
-# CANAVAR AI TRADE TERMINAL v8.0
-# Dip dönüşü + hedef fiyat + dinamik stop + backtest
+# TRADE ANALİZ v8.1
+# Teknik fırsat analizi + hedef fiyat + dinamik stop + performans analizi
 # =========================================================
 
 st.set_page_config(
-    page_title="Canavar AI Trade Terminal v8.0",
+    page_title="Trade Analiz",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# Otomatik yenileme 5 dakikadır. Toplu/paralel tarama bu sürenin altında tamamlanacak şekilde tasarlanmıştır.
-st_autorefresh(interval=300_000, key="canavar_autorefresh")
+# Normal kullanımda sayfa 60 saniyede bir yenilenir.
+# Tarama aktifken otomatik yenileme bileşeni hiç oluşturulmaz; böylece uzun taramalar kesilmez.
+if "tarama_aktif" not in st.session_state:
+    st.session_state["tarama_aktif"] = False
+if not st.session_state["tarama_aktif"]:
+    st_autorefresh(interval=60_000, key="trade_analiz_autorefresh")
 
 DATA_DIR = Path("canavar_data")
 DATA_DIR.mkdir(exist_ok=True)
@@ -378,9 +382,9 @@ def karar_motoru(ticker: str, plan: TradePlan, piyasa: Dict[str, Any]) -> Dict[s
 
     # Aşama cezaları tamamen elemez; yalnızca sıralamada aşağı iter.
     asama_cezasi = 0
-    if "UYGUN DEĞİL" in plan.asama:
+    if "KOŞULLAR YETERSİZ" in plan.asama:
         asama_cezasi = -9
-    elif "TEYİT BEKLE" in plan.asama:
+    elif "TEYİT BEKLENİYOR" in plan.asama:
         asama_cezasi = -3
     puan += asama_cezasi
 
@@ -395,15 +399,15 @@ def karar_motoru(ticker: str, plan: TradePlan, piyasa: Dict[str, Any]) -> Dict[s
     puan += piyasa_duzeltmesi
     puan = int(max(0, min(100, round(puan))))
 
-    teyit_var = "UYGUN DEĞİL" not in plan.asama and "TEYİT BEKLE" not in plan.asama
+    teyit_var = "KOŞULLAR YETERSİZ" not in plan.asama and "TEYİT BEKLENİYOR" not in plan.asama
     if puan >= 76 and plan.risk_kazanc >= 1.5 and plan.dip_puani >= 50:
-        karar = "🟢 GÜÇLÜ FIRSAT" if teyit_var else "🟠 ERKEN FIRSAT"
+        karar = "🟢 YÜKSEK POTANSİYEL" if teyit_var else "🟠 ERKEN AŞAMA"
     elif puan >= 66:
-        karar = "🟡 TAKİP / HAZIRLAN"
+        karar = "🟡 İZLEME LİSTESİ"
     elif puan >= 54:
-        karar = "🟠 ZAYIF ADAY"
+        karar = "🟠 SINIRLI POTANSİYEL"
     else:
-        karar = "🔴 RİSKLİ"
+        karar = "🔴 YÜKSEK RİSK"
 
     # Geçmiş veri temelli yaklaşık gerçekleşme olasılığı; kesinlik değildir.
     olasilik = 30 + puan * 0.52
@@ -845,13 +849,13 @@ def islem_plani_hesapla(ticker_name: str, df_raw: Optional[pd.DataFrame] = None)
         bool(vol_ratio >= 1.2 and gunluk > 0),
     ])
     if dip_puani >= 75 and teyit_sayisi >= 2:
-        asama = "🟢 GÜÇLÜ DİP DÖNÜŞÜ"
+        asama = "🟢 TEYİTLİ TOPARLANMA"
     elif dip_puani >= 60 and teyit_sayisi >= 1:
-        asama = "🟡 ALIM BÖLGESİ / TEYİTLİ"
+        asama = "🟡 TEYİTLİ ALIM BÖLGESİ"
     elif dip_puani >= 50:
-        asama = "🟠 DİP ADAYI / TEYİT BEKLE"
+        asama = "🟠 TOPARLANMA ADAYI / TEYİT BEKLENİYOR"
     else:
-        asama = "🔴 UYGUN DEĞİL"
+        asama = "🔴 KOŞULLAR YETERSİZ"
 
     destekler, direncler = destek_direnc_bul(x)
     alt_destekler = [s for s in destekler if s < fiyat]
@@ -1006,7 +1010,7 @@ def backtest_yap(ticker_name: str, gun: int = 500, min_puan: int = 65) -> Tuple[
             continue
         parcali = df.iloc[: i + 1]
         plan = islem_plani_hesapla(ticker_name, parcali)
-        if plan is None or plan.dip_puani < min_puan or "UYGUN DEĞİL" in plan.asama or "TEYİT BEKLE" in plan.asama:
+        if plan is None or plan.dip_puani < min_puan or "KOŞULLAR YETERSİZ" in plan.asama or "TEYİT BEKLENİYOR" in plan.asama:
             continue
 
         giris = float(df["Close"].iloc[i])
@@ -1144,41 +1148,44 @@ if portfoy:
     st.sidebar.metric("Toplam değer", f"{tr_fiyat(toplam_deger)} TL")
     st.sidebar.metric("Net K/Z", f"{tr_fiyat(net)} TL", f"{100*net/toplam_maliyet:+.2f}%" if toplam_maliyet else "0%")
 
-st.title("🛡️ Canavar AI Trade Terminal v8.0")
+st.title("📊 Trade Analiz")
 col_sub1, col_sub2 = st.columns([0.82, 0.18])
 with col_sub1:
-    st.caption(f"Dip dönüşü • hedef fiyat • dinamik stop • geçmiş benzerlik analizi • hızlı/paralel tarama • {len(aktif_havuz)} BIST hissesi")
+    st.caption(f"Teknik fırsat analizi • hedef fiyat • dinamik stop • geçmiş performans • hızlı ve paralel tarama • {len(aktif_havuz)} BIST hissesi")
 with col_sub2:
-    reset_key = datetime.now().strftime("%Y%m%d%H%M%S")
-    components.html(
-        f"""
-        <div style="font-family:Arial;display:flex;justify-content:flex-end;gap:6px;align-items:center">
-          <span style="color:#888;font-size:11px">Yenileme:</span>
-          <span id="countdown_{reset_key}" style="font-size:13px;font-weight:bold;background:#1f232a;padding:2px 8px;border-radius:4px">15dk</span>
-        </div>
-        <script>
-          let t=900; const e=document.getElementById('countdown_{reset_key}');
-          const id=setInterval(()=>{{if(t<=0){{e.innerHTML='Yenileniyor...';clearInterval(id)}}else{{const m=Math.floor(t/60); const sn=t%60; e.innerHTML=(m>0?m+'dk ':'')+sn+'s';t--;}}}},1000);
-        </script>
-        """,
-        height=32,
-    )
+    if st.session_state.get("tarama_aktif", False):
+        st.info("⏸️ Tarama sırasında otomatik yenileme durduruldu")
+    else:
+        reset_key = datetime.now().strftime("%Y%m%d%H%M%S")
+        components.html(
+            f"""
+            <div style="font-family:Arial;display:flex;justify-content:flex-end;gap:6px;align-items:center">
+              <span style="color:#888;font-size:11px">Yenileme:</span>
+              <span id="countdown_{reset_key}" style="font-size:13px;font-weight:bold;background:#1f232a;padding:2px 8px;border-radius:4px">60s</span>
+            </div>
+            <script>
+              let t=60; const e=document.getElementById('countdown_{reset_key}');
+              const id=setInterval(()=>{{if(t<=0){{e.innerHTML='Yenileniyor...';clearInterval(id)}}else{{e.innerHTML=t+'s';t--;}}}},1000);
+            </script>
+            """,
+            height=32,
+        )
 
 for mesaj in alarmlari_kontrol_et():
     st.error(mesaj)
 
 t0, t1, t2, t3, t4, t5, t6 = st.tabs([
-    "🏆 Günün Top 10'u",
-    "🎯 Dipten Al / Pikten Sat",
-    "💼 Portföy Asistanı",
-    "🧪 Backtest",
-    "📖 Temel Analiz",
-    "🔔 Bildirimler / Alarmlar",
-    "🧠 İşlem Günlüğü / Öğrenme",
+    "🎯 Öne Çıkan Fırsatlar",
+    "🔎 Piyasa Tarama",
+    "💼 Portföy Yönetimi",
+    "📈 Performans Analizi",
+    "🏢 Şirket Analizi",
+    "🔔 Bildirim Merkezi",
+    "🗂️ İşlem ve Öğrenme Merkezi",
 ])
 
 with t0:
-    st.header("🏆 Bugünün En İyi BIST Fırsatları")
+    st.header("🎯 Öne Çıkan BIST Fırsatları")
     piyasa_anlik = piyasa_rejimi_hesapla()
     a, b, c, d = st.columns(4)
     a.metric("BIST piyasa puanı", f"{piyasa_anlik['puan']}/100")
@@ -1190,7 +1197,7 @@ with t0:
     top10 = st.session_state.get("top10_karar", veri_yukle(TARAMA_DOSYASI, []))
     if top10:
         st.info(
-            "Liste, 'AL' filtresine göre değil toplam kalite puanına göre sıralanır. "
+            "Liste, 'alım' filtresine göre değil toplam kalite puanına göre sıralanır. "
             "Piyasa zayıfsa hisseler listeden çıkarılmaz; yalnızca önerilen pozisyon oranı küçülür."
         )
         for i, x in enumerate(top10[:10], 1):
@@ -1216,11 +1223,11 @@ with t0:
 
         en_iyi = top10[0]
         if int(en_iyi.get("Karar Puanı", 0)) < 66:
-            st.warning("Bugün güçlü teyitli fırsat yok. Liste, piyasadaki göreceli olarak en iyi adayları gösteriyor; küçük pozisyon veya izleme yaklaşımı daha uygundur.")
+            st.warning("Bugün yüksek güvenli ve teyitli bir fırsat bulunmuyor. Liste, piyasadaki göreceli olarak en iyi adayları gösteriyor; küçük pozisyon veya izleme yaklaşımı daha uygundur.")
         elif piyasa_anlik["durum"] == "RİSKLİ":
             st.warning(f"Piyasa zayıf. En iyi hisseler listeleniyor ancak normal pozisyonun yaklaşık %{risk_orani}'i öneriliyor.")
     else:
-        st.info("Önce Dipten Al / Pikten Sat sekmesinden havuzu tarayın.")
+        st.info("Önce Piyasa Tarama sekmesinden bir tarama başlatın.")
 
     st.subheader("🔔 Son Bildirimler")
     bildirimler = list(reversed(veri_yukle(BILDIRIM_DOSYASI, [])))[:10]
@@ -1232,7 +1239,7 @@ with t0:
         st.info("Henüz bildirim oluşmadı.")
 
 with t1:
-    st.header("🎯 BIST Dip Dönüşü Tarayıcısı")
+    st.header("🔎 BIST Teknik Fırsat Tarayıcısı")
     c1, c2, c3 = st.columns(3)
     with c1:
         minimum_puan = st.slider("Minimum dip puanı", 40, 90, 60)
@@ -1259,7 +1266,29 @@ with t1:
         secili_havuz = aktif_havuz
     st.caption(f"Bu taramada {len(secili_havuz)} hisse incelenecek. Veriler gruplar hâlinde paralel indirilecektir.")
 
-    if st.button("🔎 Seçili havuzu tara", type="primary", use_container_width=True):
+    tarama_butonu = st.button(
+        "🔎 Seçili havuzu tara",
+        type="primary",
+        use_container_width=True,
+        disabled=st.session_state.get("tarama_aktif", False),
+    )
+    if tarama_butonu:
+        st.session_state["tarama_istegi"] = {
+            "minimum_puan": int(minimum_puan),
+            "sadece_teyitli": bool(sadece_teyitli),
+            "maksimum_hisse": int(maksimum_hisse),
+            "secili_havuz": list(secili_havuz),
+        }
+        st.session_state["tarama_aktif"] = True
+        st.rerun()
+
+    if st.session_state.get("tarama_aktif", False):
+        istek = st.session_state.get("tarama_istegi", {})
+        minimum_puan = int(istek.get("minimum_puan", minimum_puan))
+        sadece_teyitli = bool(istek.get("sadece_teyitli", sadece_teyitli))
+        maksimum_hisse = int(istek.get("maksimum_hisse", maksimum_hisse))
+        secili_havuz = list(istek.get("secili_havuz", secili_havuz))
+        st.warning("⏸️ Tarama devam ediyor. Otomatik sayfa yenileme geçici olarak durduruldu.")
         bar = st.progress(0)
         durum = st.empty()
         uygun_sonuclar: List[Dict[str, Any]] = []
@@ -1328,7 +1357,7 @@ with t1:
             if plan.dip_puani < minimum_puan:
                 puan_altinda += 1
                 continue
-            if sadece_teyitli and ("TEYİT BEKLE" in plan.asama or "UYGUN DEĞİL" in plan.asama):
+            if sadece_teyitli and ("TEYİT BEKLENİYOR" in plan.asama or "KOŞULLAR YETERSİZ" in plan.asama):
                 teyitsiz += 1
                 continue
             sinyal_kaydet(plan)
@@ -1352,7 +1381,7 @@ with t1:
         veri_kaydet(TARAMA_DOSYASI, tum_adaylar[:10])
         for aday in tum_adaylar[:10]:
             if aday.get("Güven", 0) >= 75:
-                bildirim_ekle("SİNYAL", f"{aday['Hisse']} güçlü aday", f"{aday['Aşama']} | {aday['Alım Bölgesi']} | Hedef 1: {aday['Hedef 1']}", f"top-{aday['Hisse']}-{datetime.now().strftime('%Y-%m-%d')}")
+                bildirim_ekle("SİNYAL", f"{aday['Hisse']} yüksek potansiyelli aday", f"{aday['Aşama']} | {aday['Alım Bölgesi']} | Hedef 1: {aday['Hedef 1']}", f"top-{aday['Hisse']}-{datetime.now().strftime('%Y-%m-%d')}")
         st.session_state["tarama_planlari"] = {k: asdict(v) for k, v in planlar.items()}
         st.session_state["tarama_kararlari"] = kararlar
         st.session_state["tarama_ozeti"] = {
@@ -1363,6 +1392,13 @@ with t1:
             "esik_esnetildi": esik_esnetildi,
             "minimum_puan": minimum_puan,
         }
+        st.session_state["tarama_aktif"] = False
+        st.session_state.pop("tarama_istegi", None)
+        st.session_state["tarama_tamamlandi"] = True
+        st.rerun()
+
+    if st.session_state.pop("tarama_tamamlandi", False):
+        st.success("✅ Tarama tamamlandı. Otomatik yenileme yeniden etkinleştirildi.")
 
     sonuclar = st.session_state.get("tarama_sonuclari", [])
     tarama_ozeti = st.session_state.get("tarama_ozeti", {})
@@ -1431,7 +1467,7 @@ with t1:
         st.info("Tarama kapsamını seçip butona basın. Günlük kullanım için Hızlı mod önerilir.")
 
 with t2:
-    st.header("💼 Portföyde Pikten Satış ve Kâr Koruma")
+    st.header("💼 Portföy Kâr Koruma ve Çıkış Yönetimi")
     if not portfoy:
         st.info("Önce yan menüden portföye hisse ekleyin.")
     else:
