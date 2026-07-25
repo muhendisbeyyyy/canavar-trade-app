@@ -17,12 +17,12 @@ from streamlit_autorefresh import st_autorefresh
 import yfinance as yf
 
 # =========================================================
-# CANAVAR AI TRADE TERMINAL v6.0
+# CANAVAR AI TRADE TERMINAL v7.0
 # Dip dönüşü + hedef fiyat + dinamik stop + backtest
 # =========================================================
 
 st.set_page_config(
-    page_title="Canavar AI Trade Terminal v6.0",
+    page_title="Canavar AI Trade Terminal v7.0",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -229,13 +229,18 @@ def ogrenme_ayari(ticker: str = "") -> Dict[str, float]:
 
 
 def karar_motoru(ticker: str, plan: TradePlan, piyasa: Dict[str, Any]) -> Dict[str, Any]:
-    """Dip puanından ayrı olarak işlem yapılabilirlik puanı ve açık karar üretir."""
+    """Her hisseyi piyasa rejiminden bağımsız sıralar; piyasa yalnızca küçük risk düzeltmesi yapar."""
     df = fiyat_verisi_getir(ticker, "1y")
     if df.empty or len(df) < 60:
-        return {"puan": 0, "karar": "VERİ YOK", "trend": 0, "hacim": 0, "nedenler": ["Yeterli fiyat verisi yok"]}
+        return {"puan": 0, "karar": "VERİ YOK", "trend": 0, "hacim": 0,
+                "olasılık": 0, "pozisyon": 0, "bilesenler": {},
+                "nedenler": ["Yeterli fiyat verisi yok"]}
     x = gostergeleri_hesapla(df).dropna()
     if x.empty:
-        return {"puan": 0, "karar": "VERİ YOK", "trend": 0, "hacim": 0, "nedenler": ["Gösterge verisi üretilemedi"]}
+        return {"puan": 0, "karar": "VERİ YOK", "trend": 0, "hacim": 0,
+                "olasılık": 0, "pozisyon": 0, "bilesenler": {},
+                "nedenler": ["Gösterge verisi üretilemedi"]}
+
     r = x.iloc[-1]
     close = float(r["Close"])
     sma20 = float(r.get("SMA20", close))
@@ -246,54 +251,103 @@ def karar_motoru(ticker: str, plan: TradePlan, piyasa: Dict[str, Any]) -> Dict[s
     onceki_macd = float(x["MACD_HIST"].iloc[-2]) if len(x) > 1 else macd_hist
 
     trend = 0
-    trend += 35 if close > ema9 else 5
-    trend += 35 if close > sma20 else 5
-    trend += 30 if sma20 > sma50 else 0
+    trend += 30 if close > ema9 else 8
+    trend += 35 if close > sma20 else 8
+    trend += 25 if sma20 > sma50 else 5
+    trend += 10 if close > sma50 else 0
     trend = int(max(0, min(100, trend)))
+
     hacim = int(max(0, min(100, 45 + (vol_ratio - 1) * 45)))
-    momentum = 70 if macd_hist > onceki_macd else 30
-    risk = int(max(0, min(100, 100 - plan.risk_yuzde * 8 - max(0, plan.atr_yuzde - 4) * 5)))
+    momentum = 75 if macd_hist > onceki_macd and macd_hist > 0 else (60 if macd_hist > onceki_macd else 30)
+    risk = int(max(0, min(100, 100 - plan.risk_yuzde * 7 - max(0, plan.atr_yuzde - 4) * 4)))
     rr = int(max(0, min(100, plan.risk_kazanc / 3 * 100)))
     piyasa_puani = int(piyasa.get("puan", 50))
 
-    puan = (
-        plan.dip_puani * 0.24 + plan.sinyal_guveni * 0.18 + trend * 0.18 +
-        hacim * 0.10 + momentum * 0.08 + risk * 0.08 + rr * 0.08 + piyasa_puani * 0.06
-    )
+    # Ana kalite puanı: piyasa yalnızca %2 ağırlığa sahiptir.
+    bilesenler = {
+        "Dip dönüş": round(plan.dip_puani * 0.27, 1),
+        "Sinyal güveni": round(plan.sinyal_guveni * 0.19, 1),
+        "Trend": round(trend * 0.20, 1),
+        "Hacim": round(hacim * 0.11, 1),
+        "Momentum": round(momentum * 0.09, 1),
+        "Risk kalitesi": round(risk * 0.07, 1),
+        "Risk/kazanç": round(rr * 0.05, 1),
+        "Piyasa": round(piyasa_puani * 0.02, 1),
+    }
+    puan = sum(bilesenler.values())
     ayar = ogrenme_ayari(ticker)
-    puan += ayar["global"] + ayar["hisse"]
+    ogrenme = ayar["global"] + ayar["hisse"]
+    puan += ogrenme
+
+    # Aşama cezaları tamamen elemez; yalnızca sıralamada aşağı iter.
+    asama_cezasi = 0
     if "UYGUN DEĞİL" in plan.asama:
-        puan -= 14
+        asama_cezasi = -9
     elif "TEYİT BEKLE" in plan.asama:
-        puan -= 6
-    if piyasa.get("durum") == "RİSKLİ":
-        puan -= 8
+        asama_cezasi = -3
+    puan += asama_cezasi
+
+    # Piyasa cezası en fazla 3 puan; güçlü hisse yine üst sıralara çıkabilir.
+    piyasa_duzeltmesi = 0
+    if piyasa_puani < 45:
+        piyasa_duzeltmesi = -3
+    elif piyasa_puani < 55:
+        piyasa_duzeltmesi = -1
+    elif piyasa_puani >= 70:
+        piyasa_duzeltmesi = 2
+    puan += piyasa_duzeltmesi
     puan = int(max(0, min(100, round(puan))))
 
     teyit_var = "UYGUN DEĞİL" not in plan.asama and "TEYİT BEKLE" not in plan.asama
-    if puan >= 78 and teyit_var and plan.risk_kazanc >= 1.8:
-        karar = "🟢 AL"
-    elif puan >= 68 and plan.dip_puani >= 55:
-        karar = "🟠 HAZIRLAN"
-    elif puan >= 52:
-        karar = "🟡 İZLE"
+    if puan >= 76 and plan.risk_kazanc >= 1.5 and plan.dip_puani >= 50:
+        karar = "🟢 GÜÇLÜ FIRSAT" if teyit_var else "🟠 ERKEN FIRSAT"
+    elif puan >= 66:
+        karar = "🟡 TAKİP / HAZIRLAN"
+    elif puan >= 54:
+        karar = "🟠 ZAYIF ADAY"
     else:
-        karar = "⚪ UZAK DUR"
+        karar = "🔴 RİSKLİ"
+
+    # Geçmiş veri temelli yaklaşık gerçekleşme olasılığı; kesinlik değildir.
+    olasilik = 30 + puan * 0.52
+    olasilik += 4 if plan.risk_kazanc >= 2 else -2
+    olasilik += 3 if teyit_var else -4
+    olasilik -= max(0, plan.atr_yuzde - 6) * 1.2
+    olasilik = int(max(25, min(90, round(olasilik))))
+
+    # Piyasa koşuluna göre önerilen pozisyon yüzdesi.
+    if piyasa_puani < 45:
+        pozisyon = 35
+    elif piyasa_puani < 55:
+        pozisyon = 50
+    elif piyasa_puani < 68:
+        pozisyon = 70
+    else:
+        pozisyon = 100
+    if puan < 66:
+        pozisyon = min(pozisyon, 25)
 
     nedenler = []
-    if trend >= 70: nedenler.append("Kısa vadeli trend yukarı dönmüş")
-    elif trend < 40: nedenler.append("Trend henüz yeterince güçlenmemiş")
-    if hacim >= 60: nedenler.append("Hacim ortalamanın üzerinde")
+    if trend >= 70: nedenler.append("Kısa vadeli trend güçlü")
+    elif trend >= 50: nedenler.append("Trend toparlanıyor")
+    else: nedenler.append("Trend henüz zayıf")
+    if hacim >= 60: nedenler.append(f"Hacim ortalamanın üzerinde ({vol_ratio:.1f}x)")
     if momentum >= 60: nedenler.append("MACD momentumu iyileşiyor")
-    if plan.risk_kazanc >= 2: nedenler.append(f"Risk/kazanç oranı uygun: 1:{plan.risk_kazanc:.2f}")
-    if piyasa.get("durum") == "RİSKLİ": nedenler.append("BIST genel görünümü riskli")
-    if ayar["ornek"] >= 5: nedenler.append(f"İşlem günlüğü ayarı: {ayar['global'] + ayar['hisse']:+.1f} puan")
+    if plan.risk_kazanc >= 2: nedenler.append(f"Risk/kazanç uygun: 1:{plan.risk_kazanc:.2f}")
+    if plan.dip_puani >= 60: nedenler.append(f"Dip dönüş puanı güçlü: {plan.dip_puani}/100")
+    if piyasa.get("durum") == "RİSKLİ": nedenler.append(f"BIST zayıf; pozisyon %{pozisyon} ile sınırlandı")
+    if ayar["ornek"] >= 5: nedenler.append(f"İşlem günlüğü düzeltmesi: {ogrenme:+.1f} puan")
+
     return {
         "puan": puan, "karar": karar, "trend": trend, "hacim": hacim,
         "momentum": momentum, "risk": risk, "piyasa": piyasa_puani,
-        "nedenler": nedenler[:6],
+        "olasılık": olasilik, "pozisyon": pozisyon,
+        "bilesenler": bilesenler,
+        "asama_cezasi": asama_cezasi,
+        "piyasa_duzeltmesi": piyasa_duzeltmesi,
+        "ogrenme_duzeltmesi": round(ogrenme, 1),
+        "nedenler": nedenler[:7],
     }
-
 
 def islem_ac(hisse: str, fiyat: float, adet: float, kaynak: str, karar_puani: int = 0) -> None:
     islemler = veri_yukle(ISLEM_DOSYASI, [])
@@ -993,7 +1047,7 @@ if portfoy:
     st.sidebar.metric("Toplam değer", f"{tr_fiyat(toplam_deger)} TL")
     st.sidebar.metric("Net K/Z", f"{tr_fiyat(net)} TL", f"{100*net/toplam_maliyet:+.2f}%" if toplam_maliyet else "0%")
 
-st.title("🛡️ Canavar AI Trade Terminal v6.0")
+st.title("🛡️ Canavar AI Trade Terminal v7.0")
 col_sub1, col_sub2 = st.columns([0.82, 0.18])
 with col_sub1:
     st.caption(f"Dip dönüşü • hedef fiyat • dinamik stop • geçmiş benzerlik analizi • {len(aktif_havuz)} BIST hissesi")
@@ -1027,38 +1081,49 @@ t0, t1, t2, t3, t4, t5, t6 = st.tabs([
 ])
 
 with t0:
-    st.header("🏆 Canavar Karar Motoru — Bugünün İşlem Listesi")
+    st.header("🏆 Bugünün En İyi BIST Fırsatları")
     piyasa_anlik = piyasa_rejimi_hesapla()
-    a, b, c = st.columns(3)
+    a, b, c, d = st.columns(4)
     a.metric("BIST piyasa puanı", f"{piyasa_anlik['puan']}/100")
     b.metric("Piyasa durumu", piyasa_anlik["durum"])
     c.metric("20 günlük momentum", f"%{piyasa_anlik['momentum']:+.2f}")
+    risk_orani = 35 if piyasa_anlik['puan'] < 45 else (50 if piyasa_anlik['puan'] < 55 else (70 if piyasa_anlik['puan'] < 68 else 100))
+    d.metric("Genel pozisyon oranı", f"%{risk_orani}")
 
     top10 = st.session_state.get("top10_karar", veri_yukle(TARAMA_DOSYASI, []))
-    alimlik = [x for x in top10 if x.get("Karar") == "🟢 AL"]
-    hazir = [x for x in top10 if x.get("Karar") == "🟠 HAZIRLAN"]
-    if alimlik:
-        st.success(f"Karar motoru bugün {len(alimlik)} hisseyi işlem yapılabilir buldu.")
-        for i, x in enumerate(alimlik[:10], 1):
+    if top10:
+        st.info(
+            "Liste, 'AL' filtresine göre değil toplam kalite puanına göre sıralanır. "
+            "Piyasa zayıfsa hisseler listeden çıkarılmaz; yalnızca önerilen pozisyon oranı küçülür."
+        )
+        for i, x in enumerate(top10[:10], 1):
+            karar = x.get("Karar", "-")
+            puan = int(x.get("Karar Puanı", 0))
             with st.container(border=True):
-                c1, c2, c3, c4, c5 = st.columns([0.7, 1.4, 1, 1, 1])
-                c1.markdown(f"### #{i}")
-                c2.markdown(f"### {x['Hisse']} — {x['Karar']}")
-                c3.metric("Karar puanı", f"{x['Karar Puanı']}/100")
-                c4.metric("Hedef 1", x["Hedef 1"])
-                c5.metric("Stop", x["Stop"])
-                st.write(f"**Alım bölgesi:** {x['Alım Bölgesi']}  |  **Beklenen süre:** {x['Beklenen Süre']}  |  **R/K:** {x['R/K']}")
-                st.caption(x.get("Karar Nedeni", ""))
+                c1, c2, c3, c4, c5, c6 = st.columns([0.55, 1.35, 0.9, 1.0, 1.0, 0.9])
+                c1.markdown(f"## #{i}")
+                c2.markdown(f"### {x['Hisse']}  \n{karar}")
+                c3.metric("Kalite", f"{puan}/100")
+                c4.metric("Olasılık", x.get("Gerçekleşme Olasılığı", "-"))
+                c5.metric("Hedef 1", x.get("Hedef 1", "-"))
+                c6.metric("Pozisyon", x.get("Pozisyon", "-"))
+                st.write(
+                    f"**Alım bölgesi:** {x.get('Alım Bölgesi','-')}  |  "
+                    f"**Stop:** {x.get('Stop','-')}  |  **R/K:** {x.get('R/K','-')}  |  "
+                    f"**Süre:** {x.get('Beklenen Süre','-')}"
+                )
+                if x.get("Puan Dağılımı"):
+                    with st.expander("Puanın nasıl oluştuğunu göster"):
+                        st.write(x["Puan Dağılımı"])
+                        st.caption(x.get("Karar Nedeni", ""))
+
+        en_iyi = top10[0]
+        if int(en_iyi.get("Karar Puanı", 0)) < 66:
+            st.warning("Bugün güçlü teyitli fırsat yok. Liste, piyasadaki göreceli olarak en iyi adayları gösteriyor; küçük pozisyon veya izleme yaklaşımı daha uygundur.")
+        elif piyasa_anlik["durum"] == "RİSKLİ":
+            st.warning(f"Piyasa zayıf. En iyi hisseler listeleniyor ancak normal pozisyonun yaklaşık %{risk_orani}'i öneriliyor.")
     else:
-        st.warning("Bugün karar motorunun 'AL' dediği hisse yok. Sistem nakitte kalmayı öneriyor.")
-        if hazir:
-            st.subheader("Yakın takip: HAZIRLAN aşamasındakiler")
-            st.dataframe(pd.DataFrame(hazir[:10]), use_container_width=True, hide_index=True)
-        elif top10:
-            st.subheader("En güçlü izleme adayları")
-            st.dataframe(pd.DataFrame(top10[:10]), use_container_width=True, hide_index=True)
-        else:
-            st.info("Önce Dipten Al / Pikten Sat sekmesinden havuzu tarayın.")
+        st.info("Önce Dipten Al / Pikten Sat sekmesinden havuzu tarayın.")
 
     st.subheader("🔔 Son Bildirimler")
     bildirimler = list(reversed(veri_yukle(BILDIRIM_DOSYASI, [])))[:10]
@@ -1110,6 +1175,8 @@ with t1:
                 "Hisse": h,
                 "Karar": karar["karar"],
                 "Karar Puanı": karar["puan"],
+                "Gerçekleşme Olasılığı": f"%{karar.get('olasılık', 0)}",
+                "Pozisyon": f"%{karar.get('pozisyon', 0)}",
                 "Fiyat": f"{plan.fiyat:.2f}",
                 "Dip Puanı": plan.dip_puani,
                 "Güven": plan.sinyal_guveni,
@@ -1125,6 +1192,10 @@ with t1:
                 "Trend": karar["trend"],
                 "Hacim": karar["hacim"],
                 "Karar Nedeni": " • ".join(karar["nedenler"]),
+                "Puan Dağılımı": " | ".join(f"{k}: +{v}" for k, v in karar.get("bilesenler", {}).items())
+                    + f" | Aşama: {karar.get('asama_cezasi', 0):+}"
+                    + f" | Piyasa: {karar.get('piyasa_duzeltmesi', 0):+}"
+                    + f" | Öğrenme: {karar.get('ogrenme_duzeltmesi', 0):+}",
             }
             tum_adaylar.append(satir)
 
@@ -1150,10 +1221,9 @@ with t1:
             esik_esnetildi = True
 
         st.session_state["tarama_sonuclari"] = uygun_sonuclar
-        karar_sirali = [x for x in tum_adaylar if x.get("Karar") in ("🟢 AL", "🟠 HAZIRLAN", "🟡 İZLE")]
         st.session_state["top10_sonuclari"] = tum_adaylar[:10]
-        st.session_state["top10_karar"] = karar_sirali[:10]
-        veri_kaydet(TARAMA_DOSYASI, karar_sirali[:10])
+        st.session_state["top10_karar"] = tum_adaylar[:10]
+        veri_kaydet(TARAMA_DOSYASI, tum_adaylar[:10])
         for aday in tum_adaylar[:10]:
             if aday.get("Güven", 0) >= 75:
                 bildirim_ekle("SİNYAL", f"{aday['Hisse']} güçlü aday", f"{aday['Aşama']} | {aday['Alım Bölgesi']} | Hedef 1: {aday['Hedef 1']}", f"top-{aday['Hisse']}-{datetime.now().strftime('%Y-%m-%d')}")
