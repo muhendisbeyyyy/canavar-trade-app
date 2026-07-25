@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -17,17 +18,18 @@ from streamlit_autorefresh import st_autorefresh
 import yfinance as yf
 
 # =========================================================
-# CANAVAR AI TRADE TERMINAL v7.0
+# CANAVAR AI TRADE TERMINAL v8.0
 # Dip dönüşü + hedef fiyat + dinamik stop + backtest
 # =========================================================
 
 st.set_page_config(
-    page_title="Canavar AI Trade Terminal v7.0",
+    page_title="Canavar AI Trade Terminal v8.0",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st_autorefresh(interval=60_000, key="canavar_autorefresh")
+# Otomatik yenileme 5 dakikadır. Toplu/paralel tarama bu sürenin altında tamamlanacak şekilde tasarlanmıştır.
+st_autorefresh(interval=300_000, key="canavar_autorefresh")
 
 DATA_DIR = Path("canavar_data")
 DATA_DIR.mkdir(exist_ok=True)
@@ -170,6 +172,101 @@ def bist_tum_semboller_getir() -> List[str]:
         return sorted(set(semboller)) or BIST_OTOMATIK_HAVUZ
     except Exception:
         return BIST_OTOMATIK_HAVUZ
+
+
+@st.cache_data(ttl=21_600, show_spinner=False)
+def bist_likit_semboller_getir(limit: int = 180) -> List[str]:
+    """TradingView verisinden yaklaşık işlem değeri en yüksek BIST hisselerini seçer."""
+    url = "https://scanner.tradingview.com/turkey/scan"
+    payload = {
+        "filter": [
+            {"left": "exchange", "operation": "equal", "right": "BIST"},
+            {"left": "type", "operation": "equal", "right": "stock"},
+        ],
+        "options": {"lang": "tr"},
+        "markets": ["turkey"],
+        "symbols": {"query": {"types": []}, "tickers": []},
+        "columns": ["name", "close", "volume", "average_volume_30d_calc"],
+        "range": [0, 1000],
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=20)
+        r.raise_for_status()
+        adaylar = []
+        for item in r.json().get("data", []):
+            sembol = str(item.get("s", "")).replace("BIST:", "").strip().upper()
+            d = item.get("d", [])
+            if not sembol or not sembol.isalnum() or len(sembol) > 8:
+                continue
+            close = float(d[1] or 0) if len(d) > 1 else 0.0
+            volume = float(d[2] or 0) if len(d) > 2 else 0.0
+            avg_volume = float(d[3] or volume) if len(d) > 3 else volume
+            islem_degeri = close * max(volume, avg_volume)
+            if close > 0 and islem_degeri > 0:
+                adaylar.append((sembol, islem_degeri))
+        adaylar.sort(key=lambda x: x[1], reverse=True)
+        sonuc = [x[0] for x in adaylar[: int(limit)]]
+        return sonuc or BIST_OTOMATIK_HAVUZ
+    except Exception:
+        return BIST_OTOMATIK_HAVUZ[: min(int(limit), len(BIST_OTOMATIK_HAVUZ))]
+
+
+def _tek_chunk_indir(semboller: Tuple[str, ...], period: str = "2y") -> Dict[str, pd.DataFrame]:
+    """Bir grup sembolü tek Yahoo isteğiyle indirir ve sembol bazında ayırır."""
+    gerekli = ["Open", "High", "Low", "Close", "Volume"]
+    yahoo = [f"{s}.IS" for s in semboller]
+    sonuc: Dict[str, pd.DataFrame] = {}
+    try:
+        df = yf.download(
+            yahoo, period=period, interval="1d", auto_adjust=True,
+            progress=False, threads=True, group_by="column", timeout=35,
+        )
+        if df.empty:
+            return sonuc
+        if len(semboller) == 1:
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            if all(c in df.columns for c in gerekli):
+                temiz = df[gerekli].dropna(subset=["Close"]).copy()
+                if len(temiz) >= 55:
+                    sonuc[semboller[0]] = temiz
+            return sonuc
+
+        if not isinstance(df.columns, pd.MultiIndex):
+            return sonuc
+        level0 = set(map(str, df.columns.get_level_values(0)))
+        fiyat_ilk = "Close" in level0
+        for sembol, ys in zip(semboller, yahoo):
+            try:
+                alt = df.xs(ys, axis=1, level=1 if fiyat_ilk else 0, drop_level=True)
+                if isinstance(alt.columns, pd.MultiIndex):
+                    alt.columns = alt.columns.get_level_values(0)
+                if all(c in alt.columns for c in gerekli):
+                    temiz = alt[gerekli].dropna(subset=["Close"]).copy()
+                    if len(temiz) >= 55:
+                        sonuc[sembol] = temiz
+            except Exception:
+                continue
+    except Exception:
+        return sonuc
+    return sonuc
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def toplu_fiyat_verisi_getir(semboller: Tuple[str, ...], period: str = "2y", chunk_size: int = 35) -> Dict[str, pd.DataFrame]:
+    """Sembolleri gruplar hâlinde paralel indirir. Başarısız kalanlar daha sonra tekil yöntemle denenir."""
+    semboller = tuple(dict.fromkeys(semboller))
+    chunks = [semboller[i:i + chunk_size] for i in range(0, len(semboller), chunk_size)]
+    sonuc: Dict[str, pd.DataFrame] = {}
+    # Yahoo'yu aşırı yüklememek için en fazla 4 paralel grup.
+    with ThreadPoolExecutor(max_workers=min(4, max(1, len(chunks)))) as pool:
+        futures = {pool.submit(_tek_chunk_indir, ch, period): ch for ch in chunks}
+        for fut in as_completed(futures):
+            try:
+                sonuc.update(fut.result())
+            except Exception:
+                pass
+    return sonuc
 
 
 def model_olasiligi(plan: TradePlan) -> int:
@@ -1047,21 +1144,21 @@ if portfoy:
     st.sidebar.metric("Toplam değer", f"{tr_fiyat(toplam_deger)} TL")
     st.sidebar.metric("Net K/Z", f"{tr_fiyat(net)} TL", f"{100*net/toplam_maliyet:+.2f}%" if toplam_maliyet else "0%")
 
-st.title("🛡️ Canavar AI Trade Terminal v7.0")
+st.title("🛡️ Canavar AI Trade Terminal v8.0")
 col_sub1, col_sub2 = st.columns([0.82, 0.18])
 with col_sub1:
-    st.caption(f"Dip dönüşü • hedef fiyat • dinamik stop • geçmiş benzerlik analizi • {len(aktif_havuz)} BIST hissesi")
+    st.caption(f"Dip dönüşü • hedef fiyat • dinamik stop • geçmiş benzerlik analizi • hızlı/paralel tarama • {len(aktif_havuz)} BIST hissesi")
 with col_sub2:
     reset_key = datetime.now().strftime("%Y%m%d%H%M%S")
     components.html(
         f"""
         <div style="font-family:Arial;display:flex;justify-content:flex-end;gap:6px;align-items:center">
           <span style="color:#888;font-size:11px">Yenileme:</span>
-          <span id="countdown_{reset_key}" style="font-size:13px;font-weight:bold;background:#1f232a;padding:2px 8px;border-radius:4px">60s</span>
+          <span id="countdown_{reset_key}" style="font-size:13px;font-weight:bold;background:#1f232a;padding:2px 8px;border-radius:4px">15dk</span>
         </div>
         <script>
-          let t=60; const e=document.getElementById('countdown_{reset_key}');
-          const id=setInterval(()=>{{if(t<=0){{e.innerHTML='Yenileniyor...';clearInterval(id)}}else{{e.innerHTML=t+'s';t--;}}}},1000);
+          let t=900; const e=document.getElementById('countdown_{reset_key}');
+          const id=setInterval(()=>{{if(t<=0){{e.innerHTML='Yenileniyor...';clearInterval(id)}}else{{const m=Math.floor(t/60); const sn=t%60; e.innerHTML=(m>0?m+'dk ':'')+sn+'s';t--;}}}},1000);
         </script>
         """,
         height=32,
@@ -1148,7 +1245,21 @@ with t1:
     with c3:
         maksimum_hisse = st.number_input("En fazla sonuç", 5, 50, 20)
 
-    if st.button("🔎 Tüm havuzu tara", type="primary", use_container_width=True):
+    tarama_modu = st.radio(
+        "Tarama kapsamı",
+        ["⚡ Hızlı — en likit 120", "📊 Geniş — en likit 250", "🌐 Tüm BIST"],
+        horizontal=True,
+        help="Günlük kullanımda Hızlı mod önerilir. Tüm BIST daha uzun sürer ve düşük likiditeli hisseleri de kapsar.",
+    )
+    if tarama_modu.startswith("⚡"):
+        secili_havuz = bist_likit_semboller_getir(120)
+    elif tarama_modu.startswith("📊"):
+        secili_havuz = bist_likit_semboller_getir(250)
+    else:
+        secili_havuz = aktif_havuz
+    st.caption(f"Bu taramada {len(secili_havuz)} hisse incelenecek. Veriler gruplar hâlinde paralel indirilecektir.")
+
+    if st.button("🔎 Seçili havuzu tara", type="primary", use_container_width=True):
         bar = st.progress(0)
         durum = st.empty()
         uygun_sonuclar: List[Dict[str, Any]] = []
@@ -1160,10 +1271,16 @@ with t1:
         puan_altinda = 0
         teyitsiz = 0
 
-        for i, h in enumerate(aktif_havuz):
-            bar.progress((i + 1) / len(aktif_havuz))
-            durum.caption(f"Taranıyor: {h} ({i + 1}/{len(aktif_havuz)})")
-            plan = islem_plani_hesapla(h)
+        durum.info(f"{len(secili_havuz)} hissenin fiyat verileri toplu ve paralel indiriliyor…")
+        toplu_veriler = toplu_fiyat_verisi_getir(tuple(secili_havuz), "2y", 35)
+        durum.info(f"Toplu veri alındı: {len(toplu_veriler)}/{len(secili_havuz)}. Teknik analiz yapılıyor…")
+
+        for i, h in enumerate(secili_havuz):
+            bar.progress((i + 1) / len(secili_havuz))
+            durum.caption(f"Analiz ediliyor: {h} ({i + 1}/{len(secili_havuz)})")
+            df_hisse = toplu_veriler.get(h)
+            # Toplu istekte gelmeyen sembolü tekil ve önbellekli yöntemle bir kez daha dene.
+            plan = islem_plani_hesapla(h, df_hisse) if df_hisse is not None else islem_plani_hesapla(h)
             if plan is None:
                 veri_alinamayan.append(h)
                 continue
@@ -1198,6 +1315,15 @@ with t1:
                     + f" | Öğrenme: {karar.get('ogrenme_duzeltmesi', 0):+}",
             }
             tum_adaylar.append(satir)
+
+            # Tarama herhangi bir nedenle yarıda kesilirse sonuçlar tamamen kaybolmasın.
+            # Her 25 hissede bir en iyi ara sonuçları diske ve oturuma kaydet.
+            if (i + 1) % 25 == 0:
+                ara_siralama = lambda z: (z["Karar Puanı"], z["Güven"], z["R/K"])
+                ara_top10 = sorted(tum_adaylar, key=ara_siralama, reverse=True)[:10]
+                veri_kaydet(TARAMA_DOSYASI, ara_top10)
+                st.session_state["top10_karar"] = ara_top10
+                st.session_state["top10_sonuclari"] = ara_top10
 
             if plan.dip_puani < minimum_puan:
                 puan_altinda += 1
@@ -1302,7 +1428,7 @@ with t1:
                 else:
                     st.warning("Yeterli sayıda benzer geçmiş formasyon bulunamadı.")
     else:
-        st.info("Tarama butonuna basın. İlk tarama veri indirdiği için biraz ağır çalışabilir.")
+        st.info("Tarama kapsamını seçip butona basın. Günlük kullanım için Hızlı mod önerilir.")
 
 with t2:
     st.header("💼 Portföyde Pikten Satış ve Kâr Koruma")
