@@ -18,7 +18,7 @@ from streamlit_autorefresh import st_autorefresh
 import yfinance as yf
 
 # =========================================================
-# TRADE ANALİZ v8.1
+# TRADE ANALİZ v8.2
 # Teknik fırsat analizi + hedef fiyat + dinamik stop + performans analizi
 # =========================================================
 
@@ -319,14 +319,70 @@ def ogrenme_ayari(ticker: str = "") -> Dict[str, float]:
     kapanan = [x for x in islemler if x.get("durum") == "KAPANDI" and x.get("getiri_yuzde") is not None]
     global_duzeltme = 0.0
     ticker_duzeltme = 0.0
-    if len(kapanan) >= 5:
+    if len(kapanan) >= 20:
         basari = sum(float(x.get("getiri_yuzde", 0)) > 0 for x in kapanan) / len(kapanan)
         global_duzeltme = max(-5.0, min(5.0, (basari - 0.50) * 20))
     ozel = [x for x in kapanan if x.get("hisse") == ticker]
-    if ticker and len(ozel) >= 3:
+    if ticker and len(ozel) >= 8:
         basari = sum(float(x.get("getiri_yuzde", 0)) > 0 for x in ozel) / len(ozel)
         ticker_duzeltme = max(-3.0, min(3.0, (basari - 0.50) * 12))
     return {"global": round(global_duzeltme, 2), "hisse": round(ticker_duzeltme, 2), "ornek": len(kapanan)}
+
+
+def risk_profili_hesapla(plan: TradePlan, trend: int, hacim: int) -> Dict[str, Any]:
+    """Stop mesafesi, oynaklık ve teknik yapıdan ayrı bir risk profili üretir."""
+    skor = plan.risk_yuzde * 7.0
+    skor += max(0.0, plan.atr_yuzde - 2.5) * 5.0
+    skor += max(0, 55 - trend) * 0.35
+    skor += max(0, 45 - hacim) * 0.15
+    skor -= min(12.0, max(0.0, plan.risk_kazanc - 1.0) * 6.0)
+    skor = int(max(0, min(100, round(skor))))
+    if skor <= 20:
+        etiket, simge = "ÇOK DÜŞÜK", "🟢"
+    elif skor <= 40:
+        etiket, simge = "DÜŞÜK", "🟢"
+    elif skor <= 60:
+        etiket, simge = "ORTA", "🟡"
+    elif skor <= 80:
+        etiket, simge = "YÜKSEK", "🟠"
+    else:
+        etiket, simge = "ÇOK YÜKSEK", "🔴"
+    return {"skor": skor, "etiket": etiket, "gosterim": f"{simge} {etiket}"}
+
+
+def kalite_sinifi(puan: int) -> str:
+    if puan >= 85: return "A+"
+    if puan >= 76: return "A"
+    if puan >= 66: return "B"
+    if puan >= 54: return "C"
+    return "D"
+
+
+def analist_degerlendirmesi(plan: TradePlan, karar: Dict[str, Any], piyasa: Dict[str, Any]) -> str:
+    parcalar: List[str] = []
+    trend = int(karar.get("trend", 0))
+    hacim = int(karar.get("hacim", 0))
+    if trend >= 70:
+        parcalar.append("Kısa vadeli trend güçlü ve fiyat yapısı toparlanmayı destekliyor.")
+    elif trend >= 50:
+        parcalar.append("Teknik görünüm toparlanıyor ancak trend henüz tam güç kazanmış değil.")
+    else:
+        parcalar.append("Trend zayıf; mevcut görünüm teyit bekleyen bir yapı gösteriyor.")
+    if hacim >= 65:
+        parcalar.append("Hacim desteği ortalamanın üzerinde.")
+    elif hacim < 40:
+        parcalar.append("Hacim desteği sınırlı olduğu için hareketin kalıcılığı dikkatle izlenmeli.")
+    if plan.risk_kazanc >= 2:
+        parcalar.append(f"Risk/kazanç oranı 1:{plan.risk_kazanc:.2f} ile olumlu.")
+    elif plan.risk_kazanc < 1.5:
+        parcalar.append(f"Risk/kazanç oranı 1:{plan.risk_kazanc:.2f} ile zayıf.")
+    risk = karar.get("risk_profili", {})
+    parcalar.append(f"İşlem riski {str(risk.get('etiket', 'BELİRSİZ')).lower()} seviyede değerlendiriliyor.")
+    if piyasa.get("durum") == "RİSKLİ":
+        parcalar.append("Genel piyasa zayıf olduğundan pozisyon büyüklüğünü sınırlı tutmak daha uygundur.")
+    elif int(piyasa.get("puan", 50)) >= 68:
+        parcalar.append("Genel piyasa koşulları işlemi destekliyor.")
+    return " ".join(parcalar)
 
 
 def karar_motoru(ticker: str, plan: TradePlan, piyasa: Dict[str, Any]) -> Dict[str, Any]:
@@ -398,6 +454,7 @@ def karar_motoru(ticker: str, plan: TradePlan, piyasa: Dict[str, Any]) -> Dict[s
         piyasa_duzeltmesi = 2
     puan += piyasa_duzeltmesi
     puan = int(max(0, min(100, round(puan))))
+    risk_profili = risk_profili_hesapla(plan, trend, hacim)
 
     teyit_var = "KOŞULLAR YETERSİZ" not in plan.asama and "TEYİT BEKLENİYOR" not in plan.asama
     if puan >= 76 and plan.risk_kazanc >= 1.5 and plan.dip_puani >= 50:
@@ -407,7 +464,7 @@ def karar_motoru(ticker: str, plan: TradePlan, piyasa: Dict[str, Any]) -> Dict[s
     elif puan >= 54:
         karar = "🟠 SINIRLI POTANSİYEL"
     else:
-        karar = "🔴 YÜKSEK RİSK"
+        karar = "⚪ ZAYIF GÖRÜNÜM"
 
     # Geçmiş veri temelli yaklaşık gerçekleşme olasılığı; kesinlik değildir.
     olasilik = 30 + puan * 0.52
@@ -439,10 +496,11 @@ def karar_motoru(ticker: str, plan: TradePlan, piyasa: Dict[str, Any]) -> Dict[s
     if piyasa.get("durum") == "RİSKLİ": nedenler.append(f"BIST zayıf; pozisyon %{pozisyon} ile sınırlandı")
     if ayar["ornek"] >= 5: nedenler.append(f"İşlem günlüğü düzeltmesi: {ogrenme:+.1f} puan")
 
-    return {
+    sonuc = {
         "puan": puan, "karar": karar, "trend": trend, "hacim": hacim,
         "momentum": momentum, "risk": risk, "piyasa": piyasa_puani,
         "olasılık": olasilik, "pozisyon": pozisyon,
+        "risk_profili": risk_profili, "kalite_sinifi": kalite_sinifi(puan),
         "bilesenler": bilesenler,
         "asama_cezasi": asama_cezasi,
         "piyasa_duzeltmesi": piyasa_duzeltmesi,
@@ -1206,9 +1264,11 @@ with t0:
             with st.container(border=True):
                 c1, c2, c3, c4, c5, c6 = st.columns([0.55, 1.35, 0.9, 1.0, 1.0, 0.9])
                 c1.markdown(f"## #{i}")
-                c2.markdown(f"### {x['Hisse']}  \n{karar}")
-                c3.metric("Kalite", f"{puan}/100")
-                c4.metric("Olasılık", x.get("Gerçekleşme Olasılığı", "-"))
+                risk_gosterim = x.get("Risk", "-")
+                kalite_notu = x.get("Kalite Sınıfı", kalite_sinifi(puan))
+                c2.markdown(f"### {x['Hisse']}  \n{karar}  \n**Risk:** {risk_gosterim}")
+                c3.metric("Kalite", f"{puan}/100 ({kalite_notu})")
+                c4.metric("Başarı olasılığı", x.get("Gerçekleşme Olasılığı", "-"))
                 c5.metric("Hedef 1", x.get("Hedef 1", "-"))
                 c6.metric("Pozisyon", x.get("Pozisyon", "-"))
                 st.write(
@@ -1216,6 +1276,8 @@ with t0:
                     f"**Stop:** {x.get('Stop','-')}  |  **R/K:** {x.get('R/K','-')}  |  "
                     f"**Süre:** {x.get('Beklenen Süre','-')}"
                 )
+                if x.get("Analist Değerlendirmesi"):
+                    st.info(f"**Değerlendirme:** {x['Analist Değerlendirmesi']}")
                 if x.get("Puan Dağılımı"):
                     with st.expander("Puanın nasıl oluştuğunu göster"):
                         st.write(x["Puan Dağılımı"])
@@ -1321,6 +1383,9 @@ with t1:
                 "Hisse": h,
                 "Karar": karar["karar"],
                 "Karar Puanı": karar["puan"],
+                "Kalite Sınıfı": karar.get("kalite_sinifi", "-"),
+                "Risk": karar.get("risk_profili", {}).get("gosterim", "-"),
+                "Risk Puanı": karar.get("risk_profili", {}).get("skor", 0),
                 "Gerçekleşme Olasılığı": f"%{karar.get('olasılık', 0)}",
                 "Pozisyon": f"%{karar.get('pozisyon', 0)}",
                 "Fiyat": f"{plan.fiyat:.2f}",
@@ -1338,6 +1403,7 @@ with t1:
                 "Trend": karar["trend"],
                 "Hacim": karar["hacim"],
                 "Karar Nedeni": " • ".join(karar["nedenler"]),
+                "Analist Değerlendirmesi": karar.get("analist_yorumu", ""),
                 "Puan Dağılımı": " | ".join(f"{k}: +{v}" for k, v in karar.get("bilesenler", {}).items())
                     + f" | Aşama: {karar.get('asama_cezasi', 0):+}"
                     + f" | Piyasa: {karar.get('piyasa_duzeltmesi', 0):+}"
@@ -1427,12 +1493,13 @@ with t1:
             p = TradePlan(**plan_dict)
             st.subheader(f"{p.ticker} işlem planı")
             kd = st.session_state.get("tarama_kararlari", {}).get(secili, {})
-            a, b, c, d, e = st.columns(5)
-            a.metric("Karar", kd.get("karar", "-"))
-            b.metric("Karar puanı", f"{kd.get('puan', 0)}/100")
-            c.metric("Dip puanı", f"{p.dip_puani}/100")
-            d.metric("Hedef 1 potansiyeli", f"%{p.potansiyel_1:.1f}")
-            e.metric("Risk/Kazanç", f"1:{p.risk_kazanc:.2f}")
+            a, b, c, d, e, f = st.columns(6)
+            a.metric("Görünüm", kd.get("karar", "-"))
+            b.metric("Kalite", f"{kd.get('puan', 0)}/100 ({kd.get('kalite_sinifi', '-')})")
+            c.metric("İşlem riski", kd.get("risk_profili", {}).get("gosterim", "-"))
+            d.metric("Başarı olasılığı", f"%{kd.get('olasılık', 0)}")
+            e.metric("Hedef 1 potansiyeli", f"%{p.potansiyel_1:.1f}")
+            f.metric("Risk/Kazanç", f"1:{p.risk_kazanc:.2f}")
             st.info(
                 f"**{p.asama}**  |  Alım: **{p.alim_alt:.2f}–{p.alim_ust:.2f} TL**  |  "
                 f"Hedef 1: **{p.hedef_1:.2f} TL**  |  Hedef 2: **{p.hedef_2:.2f} TL**  |  "
@@ -1441,6 +1508,8 @@ with t1:
             if st.button(f"{p.ticker} işlemini günlüğe ekle", key=f"gunluk_{p.ticker}"):
                 islem_ac(p.ticker, p.fiyat, 1, "Tarama", int(kd.get("puan", 0)))
                 st.success("İşlem günlüğüne eklendi. Adet ve gerçek alış fiyatını İşlem Günlüğü sekmesinden düzenlemek yerine yeni kayıt açabilirsiniz.")
+            if kd.get("analist_yorumu"):
+                st.info(f"**Analist değerlendirmesi:** {kd['analist_yorumu']}")
             if kd.get("nedenler"):
                 st.markdown("**Karar motorunun gerekçesi**")
                 for n in kd["nedenler"]:
@@ -1625,16 +1694,32 @@ with t6:
     islemler = veri_yukle(ISLEM_DOSYASI, [])
     aciklar = [x for x in islemler if x.get("durum") == "AÇIK"]
     kapananlar = [x for x in islemler if x.get("durum") == "KAPANDI"]
+    MIN_OGRENME_ISLEMI = 20
+    tamamlanan = len(kapananlar)
+    kalan = max(0, MIN_OGRENME_ISLEMI - tamamlanan)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Açık işlem", len(aciklar))
-    c2.metric("Kapanmış işlem", len(kapananlar))
-    if kapananlar:
+    c2.metric("Kapanmış işlem", tamamlanan)
+    if tamamlanan >= MIN_OGRENME_ISLEMI:
         getiriler = [float(x.get("getiri_yuzde", 0)) for x in kapananlar]
         c3.metric("Başarı oranı", f"%{100*sum(g>0 for g in getiriler)/len(getiriler):.1f}")
         c4.metric("Ortalama getiri", f"%{np.mean(getiriler):+.2f}")
+        st.success("Öğrenme için asgari veri eşiği tamamlandı. Karar motoru kapanmış işlemlerden sınırlı puan düzeltmesi yapıyor.")
     else:
-        c3.metric("Başarı oranı", "Veri yok")
-        c4.metric("Ortalama getiri", "Veri yok")
+        c3.metric("Başarı oranı", "Henüz hesaplanmıyor")
+        c4.metric("Ortalama getiri", "Henüz hesaplanmıyor")
+        st.progress(min(1.0, tamamlanan / MIN_OGRENME_ISLEMI))
+        st.info(f"Öğrenme motorunun devreye girmesi için **{kalan} kapanmış gerçek işlem** daha gerekiyor. Tek veya birkaç işlemden çıkan %100 gibi yanıltıcı istatistikler bu nedenle gösterilmiyor.")
+
+    with st.expander("Bu bölüm nasıl kullanılır?", expanded=True):
+        st.markdown("""
+1. Gerçekte satın aldığınız hisseyi, gerçek alış fiyatını ve adedi girerek **İşlemi günlüğe ekle** düğmesine basın.
+2. İşlem açık kaldığı sürece aşağıdaki **Açık işlemler** bölümünde görünür.
+3. Hisseyi sattığınızda işlemi seçin, gerçek satış fiyatını girin ve **İşlemi kapat** düğmesine basın.
+4. Sistem gerçekleşen getiriyi hesaplar. En az 20 kapanmış işlemden sonra genel öğrenme; aynı hissede en az 8 kapanmış işlemden sonra hisseye özel sınırlı düzeltme uygulanır.
+
+Bu alan sanal deneme işlemleri için de kullanılabilir; ancak gerçek ve sanal kayıtları karıştırmamak için yalnızca aynı yöntemi tutarlı biçimde kullanın.
+""")
 
     st.subheader("Yeni gerçek işlem ekle")
     g1, g2, g3 = st.columns(3)
@@ -1671,4 +1756,7 @@ with t6:
         cols = [c for c in ["hisse","alis_tarihi","alis_fiyati","satis_tarihi","satis_fiyati","adet","karar_puani","getiri_yuzde","kaynak"] if c in kap_df.columns]
         st.dataframe(kap_df[cols].sort_values("satis_tarihi", ascending=False), use_container_width=True, hide_index=True)
         ayar = ogrenme_ayari()
-        st.info(f"Öğrenme örneği: {ayar['ornek']} kapanmış işlem | Karar puanı genel düzeltmesi: {ayar['global']:+.2f}")
+        if ayar["ornek"] >= MIN_OGRENME_ISLEMI:
+            st.info(f"Öğrenme örneği: {ayar['ornek']} kapanmış işlem | Karar puanı genel düzeltmesi: {ayar['global']:+.2f}")
+        else:
+            st.caption(f"Öğrenme pasif: {ayar['ornek']}/{MIN_OGRENME_ISLEMI} kapanmış işlem.")
