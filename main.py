@@ -18,14 +18,26 @@ from streamlit_autorefresh import st_autorefresh
 import yfinance as yf
 
 # =========================================================
-# TRADE ANALİZ v8.2
+# TRADE ANALİZ v10.0
 # Teknik fırsat analizi + hedef fiyat + dinamik stop + performans analizi
 # =========================================================
 
 st.set_page_config(
-    page_title="Trade Analiz",
+    page_title="Trade Analiz v10",
     layout="wide",
     initial_sidebar_state="expanded",
+)
+
+st.markdown(
+    """
+    <style>
+    .block-container {padding-top: 2rem; padding-bottom: 3rem;}
+    [data-testid="stMetric"] {background: rgba(30,41,59,.35); border: 1px solid rgba(148,163,184,.18); padding: 12px; border-radius: 12px;}
+    [data-testid="stSidebar"] {border-right: 1px solid rgba(148,163,184,.15);}
+    .v10-note {padding: 12px 14px; border-radius: 10px; border: 1px solid rgba(56,189,248,.25); background: rgba(14,116,144,.10);}
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 # Normal kullanımda sayfa 60 saniyede bir yenilenir.
@@ -1126,6 +1138,48 @@ def backtest_yap(ticker_name: str, gun: int = 500, min_puan: int = 65) -> Tuple[
     return sonuc_df, ozet
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def tarihsel_dogrulama_raporu(ticker_name: str, gun: int = 750, min_puan: int = 60) -> Dict[str, Any]:
+    """Geçmiş sinyalleri özetler; sonuçlar kesin tahmin değil, model doğrulama göstergesidir."""
+    islemler, ozet = backtest_yap(ticker_name, gun, min_puan)
+    if islemler.empty or not ozet:
+        return {}
+    toplam = int(ozet.get("Toplam işlem", 0))
+    basari = float(ozet.get("Başarı oranı %", 0))
+    ortalama = float(ozet.get("Ortalama getiri %", 0))
+    medyan = float(islemler["Getiri %"].median()) if "Getiri %" in islemler else 0.0
+    ort_sure = 0.0
+    if "Tarih" in islemler and len(islemler) > 1:
+        tarihler = pd.to_datetime(islemler["Tarih"], errors="coerce").dropna().sort_values()
+        if len(tarihler) > 1:
+            ort_sure = float(tarihler.diff().dt.days.dropna().median())
+    guven = "YÜKSEK" if toplam >= 30 else ("ORTA" if toplam >= 12 else "DÜŞÜK")
+    return {
+        "toplam": toplam, "basari": round(basari, 1), "ortalama": round(ortalama, 2),
+        "medyan": round(medyan, 2), "guven": guven, "esik": min_puan,
+        "bilesik": ozet.get("Bileşik getiri %", 0), "maks_dusus": ozet.get("Maksimum düşüş %", 0),
+        "islemler": islemler.to_dict("records"), "ort_sure": round(ort_sure, 1),
+    }
+
+
+def gunun_karar_ozeti(en_iyi: Dict[str, Any], piyasa: Dict[str, Any]) -> str:
+    puan = int(en_iyi.get("Karar Puanı", 0))
+    hisse = str(en_iyi.get("Hisse", "-"))
+    risk = str(en_iyi.get("Risk", "-"))
+    alim = str(en_iyi.get("Alım Bölgesi", "-"))
+    hedef = str(en_iyi.get("Hedef 1", "-"))
+    stop = str(en_iyi.get("Stop", "-"))
+    if puan >= 76 and "YÜKSEK" not in risk:
+        eylem = "Kademeli alım için değerlendirilebilir; tek seferde tam pozisyon yerine planlı giriş daha uygundur."
+    elif puan >= 66:
+        eylem = "İzleme listesinde tutulmalı; alım için fiyatın belirtilen bölgeye gelmesi ve teknik teyidin korunması beklenmelidir."
+    else:
+        eylem = "Bugün doğrudan alım yerine izleme yaklaşımı daha uygundur."
+    if piyasa.get("durum") == "RİSKLİ":
+        eylem += " Genel piyasa riskli olduğu için önerilen pozisyon oranı düşük tutulmalıdır."
+    return f"**{hisse}** günün en yüksek puanlı adayıdır. Alım bölgesi **{alim}**, ilk hedef **{hedef}**, stop **{stop}**. {eylem}"
+
+
 # -------------------------
 # Alarm kontrolü
 # -------------------------
@@ -1305,10 +1359,10 @@ if portfoy:
     st.sidebar.metric("Toplam değer", f"{tr_fiyat(toplam_deger)} TL")
     st.sidebar.metric("Net K/Z", f"{tr_fiyat(net)} TL", f"{100*net/toplam_maliyet:+.2f}%" if toplam_maliyet else "0%")
 
-st.title("📊 Trade Analiz")
+st.title("📊 Trade Analiz v10")
 col_sub1, col_sub2 = st.columns([0.82, 0.18])
 with col_sub1:
-    st.caption(f"Teknik fırsat analizi • hedef fiyat • dinamik stop • geçmiş performans • hızlı ve paralel tarama • {len(aktif_havuz)} BIST hissesi")
+    st.caption(f"Karar desteği • alım bölgesi • hedef ve stop • portföy koçu • tarihsel doğrulama • hızlı tarama • {len(aktif_havuz)} BIST hissesi")
 with col_sub2:
     if st.session_state.get("tarama_aktif", False):
         st.info("⏸️ Tarama sırasında otomatik yenileme durduruldu")
@@ -1353,6 +1407,9 @@ with t0:
 
     top10 = st.session_state.get("top10_karar", veri_yukle(TARAMA_DOSYASI, []))
     if top10:
+        st.markdown("### 🧭 Günlük Karar Özeti")
+        st.info(gunun_karar_ozeti(top10[0], piyasa_anlik))
+        st.caption("Bu özet yatırım tavsiyesi değil; teknik verilerden üretilen karar desteğidir. Emir vermeden önce fiyatı, likiditeyi ve güncel şirket haberlerini kontrol edin.")
         st.info(
             "Liste, 'alım' filtresine göre değil toplam kalite puanına göre sıralanır. "
             "Piyasa zayıfsa hisseler listeden çıkarılmaz; yalnızca önerilen pozisyon oranı küçülür."
@@ -1381,6 +1438,20 @@ with t0:
                     with st.expander("Puanın nasıl oluştuğunu göster"):
                         st.write(x["Puan Dağılımı"])
                         st.caption(x.get("Karar Nedeni", ""))
+                with st.expander("📚 Geçmiş performans doğrulaması"):
+                    st.caption("Bu test, aynı hissede geçmiş dip sinyallerinin sonucunu ölçer. Geleceği garanti etmez.")
+                    if st.button(f"{x['Hisse']} geçmişini doğrula", key=f"dogrula_top_{i}_{x['Hisse']}"):
+                        with st.spinner("Geçmiş sinyaller test ediliyor..."):
+                            rapor = tarihsel_dogrulama_raporu(x["Hisse"], 750, max(50, int(x.get("Dip Puanı", 60)) - 5))
+                        if not rapor:
+                            st.warning("Yeterli geçmiş sinyal bulunamadı.")
+                        else:
+                            r1, r2, r3, r4 = st.columns(4)
+                            r1.metric("Geçmiş işlem", rapor["toplam"])
+                            r2.metric("Başarı oranı", f"%{rapor['basari']}")
+                            r3.metric("Ortalama getiri", f"%{rapor['ortalama']:+.2f}")
+                            r4.metric("Veri güveni", rapor["guven"])
+                            st.caption(f"Medyan getiri: %{rapor['medyan']:+.2f} | Maksimum düşüş: %{rapor['maks_dusus']} | Kullanılan dip puanı eşiği: {rapor['esik']}")
 
         en_iyi = top10[0]
         if int(en_iyi.get("Karar Puanı", 0)) < 66:
@@ -1707,7 +1778,14 @@ with t2:
             c2.metric("Güncel K/Z", detay["K/Z"])
             c3.metric("İlk hedef", detay["Hedef 1"])
             c4.metric("İzlenen stop", detay["İzlenen stop"])
+            st.markdown("#### 🧭 Portföy Koçu")
             st.info(detay["Yönetim önerisi"])
+            if "HEDEF" in detay["Aşama"]:
+                st.success("Planın kâr alma aşamasına geçildi. Yeni alım yerine mevcut kazancın korunmasına odaklanın.")
+            elif "STOP" in detay["Aşama"] or "ZARAR" in detay["Aşama"]:
+                st.error("Planın risk sınırı devreye girdi. Zararı büyütmemek, ortalama düşürmeden önce planı yeniden değerlendirmek gerekir.")
+            else:
+                st.caption("Koç önerisi, portföye ekleme anında kaydedilen hedef-stop planına göre üretilir.")
             st.progress(int(float(detay["Hedef 1 ilerleme"].replace("%", ""))) / 100)
             st.caption(f"İlk hedefe ilerleme: {detay['Hedef 1 ilerleme']} | Alış tarihi: {detay['Alış tarihi']}")
 
@@ -1731,7 +1809,7 @@ with t2:
                 st.rerun()
 
 with t3:
-    st.header("🧪 Geçmiş Veri Backtest")
+    st.header("📈 Performans ve Model Doğrulama")
     st.caption("Aynı gün hedef ve stop birlikte görülürse ihtiyatlı şekilde stop önce kabul edilir.")
     bc1, bc2, bc3 = st.columns(3)
     with bc1:
@@ -1752,6 +1830,39 @@ with t3:
             st.dataframe(bt_df.sort_values("Tarih", ascending=False), use_container_width=True, hide_index=True)
             getiri_serisi = (1 + bt_df["Getiri %"] / 100).cumprod()
             st.line_chart(pd.DataFrame({"Sermaye çarpanı": getiri_serisi.values}, index=pd.to_datetime(bt_df["Tarih"])))
+
+    st.markdown("---")
+    st.subheader("🎯 Model Kalibrasyonu")
+    st.caption("Kalite puanını yapay olarak yükseltmek yerine, geçmişte benzer sinyallerin gerçekten ne kadar başarılı olduğunu ölçer.")
+    kc1, kc2, kc3 = st.columns(3)
+    with kc1:
+        kal_hisse = st.selectbox("Kalibrasyon hissesi", aktif_havuz, key="kal_hisse")
+    with kc2:
+        kal_esik = st.slider("Dip puanı eşiği", 50, 85, 60, key="kal_esik")
+    with kc3:
+        kal_donem = st.selectbox("Geçmiş dönem", [500, 750, 1000], index=1, key="kal_donem")
+    if st.button("Modeli geçmiş veride doğrula", type="primary", key="kalibrasyon_btn"):
+        with st.spinner("Model kalibrasyonu hesaplanıyor..."):
+            rapor = tarihsel_dogrulama_raporu(kal_hisse, int(kal_donem), int(kal_esik))
+        if not rapor:
+            st.warning("Seçilen koşullarda yeterli geçmiş işlem üretilemedi.")
+        else:
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("Geçmiş sinyal", rapor["toplam"])
+            m2.metric("Gerçek başarı", f"%{rapor['basari']}")
+            m3.metric("Ortalama getiri", f"%{rapor['ortalama']:+.2f}")
+            m4.metric("Medyan getiri", f"%{rapor['medyan']:+.2f}")
+            m5.metric("Veri güveni", rapor["guven"])
+            st.info("Başarı oranı, hedefe ulaşan veya pozitif kapanan geçmiş işlemlerin oranıdır. Örnek sayısı düşükse sonuçlara temkinli yaklaşılmalıdır.")
+            kal_df = pd.DataFrame(rapor["islemler"])
+            if not kal_df.empty:
+                kal_df["Puan Grubu"] = pd.cut(kal_df["Dip Puanı"], bins=[0, 54, 64, 74, 84, 100], labels=["0–54", "55–64", "65–74", "75–84", "85+"])
+                grup = kal_df.groupby("Puan Grubu", observed=False).agg(
+                    İşlem=("Getiri %", "count"),
+                    Başarı=("Getiri %", lambda z: round(100 * (z > 0).mean(), 1)),
+                    Ortalama_Getiri=("Getiri %", lambda z: round(z.mean(), 2)),
+                ).reset_index()
+                st.dataframe(grup, use_container_width=True, hide_index=True)
 
 with t4:
     st.header("📖 Şirket Temel Analiz Defteri")
