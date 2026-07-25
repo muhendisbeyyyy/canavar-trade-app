@@ -135,24 +135,46 @@ def tr_fiyat(x: float) -> str:
 # -------------------------
 @st.cache_data(ttl=300, show_spinner=False)
 def fiyat_verisi_getir(ticker_name: str, period: str = "2y") -> pd.DataFrame:
+    """Yahoo Finance verisini birkaç yöntemle dener; geçici ağ/API hatalarında boş dönmeyi azaltır."""
+    sembol = f"{ticker_name}.IS"
+    gerekli = ["Open", "High", "Low", "Close", "Volume"]
+
+    denemeler = [
+        {"period": period, "interval": "1d"},
+        {"period": "1y", "interval": "1d"},
+        {"period": "6mo", "interval": "1d"},
+    ]
+    for ayar in denemeler:
+        try:
+            df = yf.download(
+                sembol,
+                period=ayar["period"],
+                interval=ayar["interval"],
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+                timeout=15,
+            )
+            if isinstance(df.columns, pd.MultiIndex):
+                # Tek sembolde yfinance sürümüne göre kolon sırası değişebilir.
+                if all(c in df.columns.get_level_values(0) for c in gerekli):
+                    df.columns = df.columns.get_level_values(0)
+                else:
+                    df.columns = df.columns.get_level_values(-1)
+            if not df.empty and all(c in df.columns for c in gerekli):
+                df = df[gerekli].dropna(subset=["Close"]).copy()
+                if len(df) >= 55:
+                    return df
+        except Exception:
+            pass
+
     try:
-        df = yf.download(
-            f"{ticker_name}.IS",
-            period=period,
-            interval="1d",
-            auto_adjust=True,
-            progress=False,
-            threads=False,
-        )
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        gerekli = ["Open", "High", "Low", "Close", "Volume"]
-        if df.empty or any(c not in df.columns for c in gerekli):
-            return pd.DataFrame()
-        df = df[gerekli].dropna(subset=["Close"]).copy()
-        return df
+        df = yf.Ticker(sembol).history(period=period, interval="1d", auto_adjust=True)
+        if not df.empty and all(c in df.columns for c in gerekli):
+            return df[gerekli].dropna(subset=["Close"]).copy()
     except Exception:
-        return pd.DataFrame()
+        pass
+    return pd.DataFrame()
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -300,6 +322,73 @@ def haber_duygu_skori(ticker_name: str) -> Tuple[int, str]:
 
 
 # -------------------------
+# Türkçe temel analiz özeti
+# -------------------------
+SEKTOR_TR = {
+    "Financial Services": "Finansal hizmetler",
+    "Industrials": "Sanayi",
+    "Technology": "Teknoloji",
+    "Consumer Cyclical": "Döngüsel tüketim",
+    "Consumer Defensive": "Temel tüketim",
+    "Basic Materials": "Temel malzemeler",
+    "Energy": "Enerji",
+    "Utilities": "Altyapı ve enerji hizmetleri",
+    "Healthcare": "Sağlık",
+    "Communication Services": "İletişim hizmetleri",
+    "Real Estate": "Gayrimenkul",
+}
+
+ENDUSTRI_TR = {
+    "Banks—Regional": "Bölgesel bankacılık",
+    "Auto Manufacturers": "Otomotiv üretimi",
+    "Airlines": "Havayolu taşımacılığı",
+    "Steel": "Demir-çelik",
+    "Oil & Gas Refining & Marketing": "Petrol rafinajı ve pazarlaması",
+    "Telecom Services": "Telekomünikasyon",
+    "Conglomerates": "Holding ve iştirak yönetimi",
+    "Building Materials": "Yapı malzemeleri",
+    "Grocery Stores": "Gıda perakendeciliği",
+    "Electrical Equipment & Parts": "Elektrik ekipmanları",
+    "Specialty Industrial Machinery": "Özel amaçlı sanayi makineleri",
+}
+
+def _yuzde_deger(inf: Dict[str, Any], anahtar: str) -> Optional[float]:
+    try:
+        v = inf.get(anahtar)
+        return float(v) * 100 if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+def turkce_sirket_ozeti(kod: str, inf: Dict[str, Any]) -> str:
+    ad = inf.get("longName") or inf.get("shortName") or kod
+    sektor = SEKTOR_TR.get(str(inf.get("sector", "")), inf.get("sector") or "sektör bilgisi bulunmayan")
+    endustri = ENDUSTRI_TR.get(str(inf.get("industry", "")), inf.get("industry") or "faaliyet alanı belirtilmeyen")
+    ulke = "Türkiye" if str(inf.get("country", "")).lower() in {"turkey", "türkiye"} else (inf.get("country") or "Türkiye")
+
+    cumleler = [f"{ad}, {ulke} merkezli ve ağırlıklı olarak {sektor.lower()} sektöründe faaliyet gösteren bir şirkettir."]
+    if endustri:
+        cumleler.append(f"Yahoo Finance sınıflandırmasına göre ana faaliyet alanı {str(endustri).lower()} olarak görünmektedir.")
+
+    ciro = _yuzde_deger(inf, "revenueGrowth")
+    kar = _yuzde_deger(inf, "earningsGrowth")
+    marj = _yuzde_deger(inf, "profitMargins")
+    roe = _yuzde_deger(inf, "returnOnEquity")
+
+    finans = []
+    if ciro is not None:
+        finans.append(f"ciro büyümesi %{ciro:.1f}")
+    if kar is not None:
+        finans.append(f"kâr büyümesi %{kar:.1f}")
+    if marj is not None:
+        finans.append(f"net kâr marjı %{marj:.1f}")
+    if roe is not None:
+        finans.append(f"özsermaye kârlılığı %{roe:.1f}")
+    if finans:
+        cumleler.append("Mevcut verilerde " + ", ".join(finans) + " seviyesindedir.")
+    cumleler.append("Bu özet otomatik üretilmiştir; bilanço ve KAP açıklamalarıyla ayrıca doğrulanmalıdır.")
+    return " ".join(cumleler)
+
+# -------------------------
 # Dip dönüşü ve işlem planı
 # -------------------------
 def _pozitif_uyumsuzluk(close: pd.Series, rsi: pd.Series) -> bool:
@@ -314,7 +403,7 @@ def _pozitif_uyumsuzluk(close: pd.Series, rsi: pd.Series) -> bool:
 
 def islem_plani_hesapla(ticker_name: str, df_raw: Optional[pd.DataFrame] = None) -> Optional[TradePlan]:
     df = fiyat_verisi_getir(ticker_name, "2y") if df_raw is None else df_raw.copy()
-    if df.empty or len(df) < 80:
+    if df.empty or len(df) < 55:
         return None
     x = gostergeleri_hesapla(df)
     son = x.iloc[-1]
@@ -721,24 +810,34 @@ with t1:
     with c1:
         minimum_puan = st.slider("Minimum dip puanı", 40, 90, 60)
     with c2:
-        sadece_teyitli = st.checkbox("Yalnızca teyitli sinyaller", value=True)
+        sadece_teyitli = st.checkbox(
+            "Yalnızca teyitli sinyaller",
+            value=False,
+            help="Açılırsa yalnızca dönüş teyidi bulunan hisseler gösterilir; sonuç sayısı ciddi şekilde azalabilir.",
+        )
     with c3:
         maksimum_hisse = st.number_input("En fazla sonuç", 5, 50, 20)
 
     if st.button("🔎 Tüm havuzu tara", type="primary", use_container_width=True):
         bar = st.progress(0)
-        sonuclar: List[Dict[str, Any]] = []
+        durum = st.empty()
+        uygun_sonuclar: List[Dict[str, Any]] = []
+        tum_adaylar: List[Dict[str, Any]] = []
         planlar: Dict[str, TradePlan] = {}
+        veri_alinamayan: List[str] = []
+        puan_altinda = 0
+        teyitsiz = 0
+
         for i, h in enumerate(BIST_OTOMATIK_HAVUZ):
             bar.progress((i + 1) / len(BIST_OTOMATIK_HAVUZ))
+            durum.caption(f"Taranıyor: {h} ({i + 1}/{len(BIST_OTOMATIK_HAVUZ)})")
             plan = islem_plani_hesapla(h)
-            if plan is None or plan.dip_puani < minimum_puan:
+            if plan is None:
+                veri_alinamayan.append(h)
                 continue
-            if sadece_teyitli and ("TEYİT BEKLE" in plan.asama or "UYGUN DEĞİL" in plan.asama):
-                continue
-            sinyal_kaydet(plan)
+
             planlar[h] = plan
-            sonuclar.append({
+            satir = {
                 "Hisse": h,
                 "Fiyat": f"{plan.fiyat:.2f}",
                 "Dip Puanı": plan.dip_puani,
@@ -750,15 +849,61 @@ with t1:
                 "Stop": f"{plan.stop:.2f} (-%{plan.risk_yuzde:.1f})",
                 "R/K": plan.risk_kazanc,
                 "RSI": plan.rsi,
-            })
+            }
+            tum_adaylar.append(satir)
+
+            if plan.dip_puani < minimum_puan:
+                puan_altinda += 1
+                continue
+            if sadece_teyitli and ("TEYİT BEKLE" in plan.asama or "UYGUN DEĞİL" in plan.asama):
+                teyitsiz += 1
+                continue
+            sinyal_kaydet(plan)
+            uygun_sonuclar.append(satir)
+
         bar.empty()
-        sonuclar = sorted(sonuclar, key=lambda z: (z["Güven"], z["Dip Puanı"], z["R/K"]), reverse=True)[: int(maksimum_hisse)]
-        st.session_state["tarama_sonuclari"] = sonuclar
+        durum.empty()
+        siralama = lambda z: (z["Güven"], z["Dip Puanı"], z["R/K"])
+        uygun_sonuclar = sorted(uygun_sonuclar, key=siralama, reverse=True)[: int(maksimum_hisse)]
+        tum_adaylar = sorted(tum_adaylar, key=siralama, reverse=True)
+
+        esik_esnetildi = False
+        if not uygun_sonuclar and tum_adaylar:
+            # Kullanıcı boş ekran görmesin: en yüksek puanlıları izleme listesi olarak göster.
+            uygun_sonuclar = tum_adaylar[: min(int(maksimum_hisse), 10)]
+            esik_esnetildi = True
+
+        st.session_state["tarama_sonuclari"] = uygun_sonuclar
         st.session_state["tarama_planlari"] = {k: asdict(v) for k, v in planlar.items()}
+        st.session_state["tarama_ozeti"] = {
+            "veri_alinan": len(tum_adaylar),
+            "veri_alinamayan": veri_alinamayan,
+            "puan_altinda": puan_altinda,
+            "teyitsiz": teyitsiz,
+            "esik_esnetildi": esik_esnetildi,
+            "minimum_puan": minimum_puan,
+        }
 
     sonuclar = st.session_state.get("tarama_sonuclari", [])
+    tarama_ozeti = st.session_state.get("tarama_ozeti", {})
     if sonuclar:
-        st.success(f"{len(sonuclar)} aday listelendi")
+        if tarama_ozeti.get("esik_esnetildi"):
+            st.warning(
+                f"Seçtiğiniz koşullara tam uyan hisse bulunamadı. Bunun yerine en yüksek puanlı "
+                f"{len(sonuclar)} hisse izleme adayı olarak gösteriliyor. Bunlar doğrudan al sinyali değildir."
+            )
+        else:
+            st.success(f"{len(sonuclar)} aday listelendi")
+        if tarama_ozeti:
+            st.caption(
+                f"Veri alınan: {tarama_ozeti.get('veri_alinan', 0)} | "
+                f"Puan altında kalan: {tarama_ozeti.get('puan_altinda', 0)} | "
+                f"Teyit filtresinde elenen: {tarama_ozeti.get('teyitsiz', 0)} | "
+                f"Veri alınamayan: {len(tarama_ozeti.get('veri_alinamayan', []))}"
+            )
+            if tarama_ozeti.get("veri_alinamayan"):
+                with st.expander("Verisi alınamayan hisseleri göster"):
+                    st.write(", ".join(tarama_ozeti["veri_alinamayan"]))
         st.dataframe(pd.DataFrame(sonuclar), use_container_width=True, hide_index=True)
         secili = st.selectbox("Detayını göster", [s["Hisse"] for s in sonuclar])
         plan_dict = st.session_state.get("tarama_planlari", {}).get(secili)
@@ -873,7 +1018,7 @@ with t4:
             st.error("Temel veri alınamadı")
         else:
             st.write(f"### {secilen_temel}")
-            st.write(inf.get("longBusinessSummary", "Özet bilgi yok."))
+            st.info(turkce_sirket_ozeti(secilen_temel, inf))
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("F/K", round(inf.get("trailingPE"), 2) if inf.get("trailingPE") else "N/A")
             c2.metric("PD/DD", round(inf.get("priceToBook"), 2) if inf.get("priceToBook") else "N/A")
