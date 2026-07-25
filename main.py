@@ -1,6 +1,14 @@
-from datetime import datetime
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
 import json
+import math
 import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
@@ -8,725 +16,905 @@ import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
 import yfinance as yf
 
-# ==========================================
-# ⚡ KESİNTİSİZ AUTO-REFRESH (1 DAKİKA = 60.000 MS)
-# ==========================================
-st_autorefresh(interval=60000, key="canavar_autorefresh")
+# =========================================================
+# CANAVAR AI TRADE TERMINAL v4.0
+# Dip dönüşü + hedef fiyat + dinamik stop + backtest
+# =========================================================
 
 st.set_page_config(
-    page_title="Canavar AI Trade Terminal",
+    page_title="Canavar AI Trade Terminal v4.0",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ==========================================
-# 📲 TELEGRAM BİLDİRİM FONKSİYONU
-# ==========================================
-TELEGRAM_TOKEN = "8887451053:AAHszl4Q53MGxdv5cXETLEuE4IHDxq3jgEo"
-TELEGRAM_CHAT_ID = "BURAYA_CHAT_ID_YAZ"  # Kendi Telegram Chat ID'nizi girin
+st_autorefresh(interval=60_000, key="canavar_autorefresh")
 
+DATA_DIR = Path("canavar_data")
+DATA_DIR.mkdir(exist_ok=True)
+PORTFOY_DOSYASI = DATA_DIR / "portfoy_data.json"
+PIK_DOSYASI = DATA_DIR / "pik_fiyatlar.json"
+ALARMLAR_DOSYASI = DATA_DIR / "alarmlar_data.json"
+SINYAL_DOSYASI = DATA_DIR / "sinyal_gecmisi.json"
 
-def telegram_bildirim_gonder(mesaj):
-    if TELEGRAM_CHAT_ID == "BURAYA_CHAT_ID_YAZ":
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": mesaj,
-        "parse_mode": "Markdown",
-    }
+# Tokenı doğrudan koda yazmayın.
+# Windows PowerShell örneği:
+#   $env:TELEGRAM_TOKEN="..."
+#   $env:TELEGRAM_CHAT_ID="..."
+# Alternatif: .streamlit/secrets.toml içine ekleyin.
+def _secret_veya_env(anahtar: str, varsayilan: str = "") -> str:
     try:
-        requests.post(url, data=payload, timeout=5)
-    except Exception as e:
-        print(f"Telegram gönderme hatası: {e}")
+        return str(st.secrets.get(anahtar, os.getenv(anahtar, varsayilan)))
+    except Exception:
+        return os.getenv(anahtar, varsayilan)
 
 
-# ==========================================
-# 🎯 PİK FİYAT & BİLDİRİM KALICI HAFIZASI (JSON)
-# ==========================================
-PIK_DOSYASI = "pik_fiyatlar.json"
-PORTFOY_DOSYASI = "portfoy_data.json"
-ALARMLAR_DOSYASI = "alarmlar_data.json"
+TELEGRAM_TOKEN = _secret_veya_env("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = _secret_veya_env("TELEGRAM_CHAT_ID")
 
 BIST_OTOMATIK_HAVUZ = [
-    "AGHOL",
-    "AKBNK",
-    "AKCNS",
-    "AKSEN",
-    "ALARK",
-    "ALBRK",
-    "ALFAS",
-    "ARCLK",
-    "ASELS",
-    "ASTOR",
-    "BIMAS",
-    "BRSAN",
-    "BRYAT",
-    "BUCIM",
-    "CCOLA",
-    "CIMSA",
-    "CWENE",
-    "DOAS",
-    "DOHOL",
-    "ECILC",
-    "EGEEN",
-    "EKGYO",
-    "ENJSA",
-    "ENKAI",
-    "EREGL",
-    "EUPWR",
-    "FROTO",
-    "GARAN",
-    "GESAN",
-    "GUBRF",
-    "HALKB",
-    "HEKTS",
-    "IMASM",
-    "IPEKE",
-    "ISCTR",
-    "ISGYO",
-    "ISMEN",
-    "IZMDC",
-    "KARDMD",
-    "KCHOL",
-    "KONTR",
-    "KONYA",
-    "KOZAA",
-    "KOZAL",
-    "KCAER",
-    "MAVI",
-    "MGROS",
-    "MIATK",
-    "ODAS",
-    "OTKAR",
-    "OYAKC",
-    "PETKM",
-    "PGSUS",
-    "QUAGR",
-    "REEDR",
-    "SAHOL",
-    "SASA",
-    "SAYAS",
-    "SISE",
-    "SKBNK",
-    "SMRTG",
-    "SOKM",
-    "TABGD",
-    "TARKM",
-    "TCELL",
-    "THYAO",
-    "TKFEN",
-    "TOASO",
-    "TSKB",
-    "TTKOM",
-    "TUPRS",
-    "TURSG",
-    "ULKER",
-    "VAKBN",
-    "VESTL",
-    "YEOTK",
-    "YKBNK",
-    "ZOREN",
+    "AGHOL", "AKBNK", "AKCNS", "AKSEN", "ALARK", "ALBRK", "ALFAS", "ARCLK",
+    "ASELS", "ASTOR", "BIMAS", "BRSAN", "BRYAT", "BUCIM", "CCOLA", "CIMSA",
+    "CWENE", "DOAS", "DOHOL", "ECILC", "EGEEN", "EKGYO", "ENJSA", "ENKAI",
+    "EREGL", "EUPWR", "FROTO", "GARAN", "GESAN", "GUBRF", "HALKB", "HEKTS",
+    "IMASM", "IPEKE", "ISCTR", "ISGYO", "ISMEN", "IZMDC", "KARDMD", "KCHOL",
+    "KONTR", "KONYA", "KOZAA", "KOZAL", "KCAER", "MAVI", "MGROS", "MIATK",
+    "ODAS", "OTKAR", "OYAKC", "PETKM", "PGSUS", "QUAGR", "REEDR", "SAHOL",
+    "SASA", "SAYAS", "SISE", "SKBNK", "SMRTG", "SOKM", "TABGD", "TARKM",
+    "TCELL", "THYAO", "TKFEN", "TOASO", "TSKB", "TTKOM", "TUPRS", "TURSG",
+    "ULKER", "VAKBN", "VESTL", "YEOTK", "YKBNK", "ZOREN",
 ]
 
 
-def veri_yukle(dosya_adi, varsayilan):
-    if os.path.exists(dosya_adi):
-        try:
-            with open(dosya_adi, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
-            return varsayilan
-    return varsayilan
+@dataclass
+class TradePlan:
+    ticker: str
+    fiyat: float
+    dip_puani: int
+    sinyal_guveni: int
+    asama: str
+    alim_alt: float
+    alim_ust: float
+    hedef_1: float
+    hedef_2: float
+    stop: float
+    potansiyel_1: float
+    potansiyel_2: float
+    risk_yuzde: float
+    risk_kazanc: float
+    atr: float
+    atr_yuzde: float
+    rsi: float
+    gunluk_degisim: float
+    tahmini_sure: str
+    nedenler: List[str]
+    uyarilar: List[str]
 
 
-def veri_kaydet(dosya_adi, veri):
-    with open(dosya_adi, "w", encoding="utf-8") as f:
-        json.dump(veri, f, ensure_ascii=False, indent=4)
+# -------------------------
+# Dosya ve bildirim yardımcıları
+# -------------------------
+def veri_yukle(dosya_adi: Path, varsayilan: Any) -> Any:
+    if not dosya_adi.exists():
+        return varsayilan
+    try:
+        with dosya_adi.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return varsayilan
 
 
+def veri_kaydet(dosya_adi: Path, veri: Any) -> None:
+    gecici = dosya_adi.with_suffix(dosya_adi.suffix + ".tmp")
+    try:
+        with gecici.open("w", encoding="utf-8") as f:
+            json.dump(veri, f, ensure_ascii=False, indent=2, default=str)
+        gecici.replace(dosya_adi)
+    except OSError as exc:
+        st.error(f"Dosya kaydetme hatası: {exc}")
+
+
+def telegram_bildirim_gonder(mesaj: str) -> bool:
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mesaj}
+    try:
+        yanit = requests.post(url, data=payload, timeout=8)
+        yanit.raise_for_status()
+        return True
+    except requests.RequestException:
+        return False
+
+
+def tr_fiyat(x: float) -> str:
+    return f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+# -------------------------
+# Piyasa verisi
+# -------------------------
+@st.cache_data(ttl=300, show_spinner=False)
+def fiyat_verisi_getir(ticker_name: str, period: str = "2y") -> pd.DataFrame:
+    try:
+        df = yf.download(
+            f"{ticker_name}.IS",
+            period=period,
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+            threads=False,
+        )
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        gerekli = ["Open", "High", "Low", "Close", "Volume"]
+        if df.empty or any(c not in df.columns for c in gerekli):
+            return pd.DataFrame()
+        df = df[gerekli].dropna(subset=["Close"]).copy()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def temel_veri_getir(ticker_name: str) -> Dict[str, Any]:
+    try:
+        return dict(yf.Ticker(f"{ticker_name}.IS").info or {})
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def haberler_getir(ticker_name: str) -> List[Dict[str, Any]]:
+    try:
+        return list(yf.Ticker(f"{ticker_name}.IS").news or [])[:10]
+    except Exception:
+        return []
+
+
+def guncel_fiyat_bul(ticker_name: str) -> Optional[float]:
+    df = fiyat_verisi_getir(ticker_name, "1mo")
+    if df.empty:
+        return None
+    return round(float(df["Close"].iloc[-1]), 2)
+
+
+# -------------------------
+# Teknik göstergeler
+# -------------------------
+def gostergeleri_hesapla(df: pd.DataFrame) -> pd.DataFrame:
+    x = df.copy()
+    close, high, low, volume = x["Close"], x["High"], x["Low"], x["Volume"]
+
+    x["SMA10"] = close.rolling(10).mean()
+    x["SMA20"] = close.rolling(20).mean()
+    x["SMA50"] = close.rolling(50).mean()
+    x["SMA100"] = close.rolling(100).mean()
+    x["SMA200"] = close.rolling(200).mean()
+    x["EMA9"] = close.ewm(span=9, adjust=False).mean()
+    x["EMA20"] = close.ewm(span=20, adjust=False).mean()
+
+    delta = close.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
+    rs = gain / loss.replace(0, np.nan)
+    x["RSI"] = (100 - 100 / (1 + rs)).fillna(50)
+
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    x["MACD"] = ema12 - ema26
+    x["MACD_SIGNAL"] = x["MACD"].ewm(span=9, adjust=False).mean()
+    x["MACD_HIST"] = x["MACD"] - x["MACD_SIGNAL"]
+
+    std20 = close.rolling(20).std()
+    x["BB_UPPER"] = x["SMA20"] + 2 * std20
+    x["BB_LOWER"] = x["SMA20"] - 2 * std20
+    x["BB_WIDTH"] = (x["BB_UPPER"] - x["BB_LOWER"]) / x["SMA20"].replace(0, np.nan)
+
+    low14 = low.rolling(14).min()
+    high14 = high.rolling(14).max()
+    x["STOCH_K"] = 100 * (close - low14) / (high14 - low14).replace(0, np.nan)
+    x["STOCH_D"] = x["STOCH_K"].rolling(3).mean()
+
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1)
+    x["ATR"] = tr.ewm(alpha=1 / 14, adjust=False).mean()
+    x["ATR_PCT"] = 100 * x["ATR"] / close.replace(0, np.nan)
+
+    x["VOL_MA10"] = volume.rolling(10).mean()
+    x["VOL_MA20"] = volume.rolling(20).mean()
+    x["VOL_RATIO"] = volume / x["VOL_MA20"].replace(0, np.nan)
+    x["ROC5"] = close.pct_change(5) * 100
+    x["ROC20"] = close.pct_change(20) * 100
+    x["LOW20"] = low.rolling(20).min()
+    x["LOW50"] = low.rolling(50).min()
+    x["HIGH20"] = high.rolling(20).max()
+    x["HIGH50"] = high.rolling(50).max()
+    return x.replace([np.inf, -np.inf], np.nan)
+
+
+def pivot_seviyeleri(series: pd.Series, pencere: int = 3) -> Tuple[List[float], List[float]]:
+    destekler, direncler = [], []
+    vals = series.dropna().to_numpy(dtype=float)
+    if len(vals) < 2 * pencere + 1:
+        return destekler, direncler
+    for i in range(pencere, len(vals) - pencere):
+        bolum = vals[i - pencere : i + pencere + 1]
+        if vals[i] == np.min(bolum):
+            destekler.append(float(vals[i]))
+        if vals[i] == np.max(bolum):
+            direncler.append(float(vals[i]))
+    return destekler, direncler
+
+
+def yakin_seviyeleri_birlestir(seviyeler: List[float], tolerans: float = 0.02) -> List[float]:
+    if not seviyeler:
+        return []
+    sonuc: List[float] = []
+    for s in sorted(seviyeler):
+        if not sonuc or abs(s - sonuc[-1]) / max(sonuc[-1], 1e-9) > tolerans:
+            sonuc.append(s)
+        else:
+            sonuc[-1] = (sonuc[-1] + s) / 2
+    return sonuc
+
+
+def destek_direnc_bul(df: pd.DataFrame) -> Tuple[List[float], List[float]]:
+    son = df.tail(180)
+    destek_low, _ = pivot_seviyeleri(son["Low"], 3)
+    _, direnc_high = pivot_seviyeleri(son["High"], 3)
+    destekler = yakin_seviyeleri_birlestir(destek_low + [float(son["Low"].rolling(20).min().iloc[-1])])
+    direncler = yakin_seviyeleri_birlestir(direnc_high + [float(son["High"].rolling(20).max().iloc[-1])])
+    return destekler, direncler
+
+
+def haber_duygu_skori(ticker_name: str) -> Tuple[int, str]:
+    haberler = haberler_getir(ticker_name)
+    if not haberler:
+        return 0, "Aktif haber bulunamadı"
+
+    pozitif = {
+        "ihale": 2, "sözleşme": 2, "sozlesme": 2, "yatırım": 1, "yatirim": 1,
+        "temettü": 1, "temettu": 1, "bedelsiz": 1, "rekor": 1, "büyüme": 1,
+        "buyume": 1, "ihracat": 1, "ortaklık": 1, "ortaklik": 1, "kâr": 1,
+        "kar": 1, "geri alım": 1, "geri alim": 1,
+    }
+    negatif = {
+        "iptal": -2, "ceza": -2, "zarar": -1, "dava": -1, "borç": -1,
+        "borc": -1, "temerrüt": -2, "temerrut": -2, "soruşturma": -2,
+        "sorusturma": -2, "satış": -1, "satis": -1,
+    }
+    skor = 0
+    for haber in haberler[:5]:
+        baslik = str(haber.get("title", "")).lower()
+        for kelime, puan in pozitif.items():
+            if kelime in baslik:
+                skor += puan
+        for kelime, puan in negatif.items():
+            if kelime in baslik:
+                skor += puan
+    skor = int(max(-5, min(5, skor)))
+    aciklama = "Pozitif haber akışı" if skor > 0 else "Negatif haber akışı" if skor < 0 else "Nötr haber akışı"
+    return skor, aciklama
+
+
+# -------------------------
+# Dip dönüşü ve işlem planı
+# -------------------------
+def _pozitif_uyumsuzluk(close: pd.Series, rsi: pd.Series) -> bool:
+    if len(close) < 30:
+        return False
+    ilk = slice(-30, -15)
+    ikinci = slice(-15, None)
+    fiyat1, fiyat2 = float(close.iloc[ilk].min()), float(close.iloc[ikinci].min())
+    rsi1, rsi2 = float(rsi.iloc[ilk].min()), float(rsi.iloc[ikinci].min())
+    return fiyat2 < fiyat1 and rsi2 > rsi1 + 2
+
+
+def islem_plani_hesapla(ticker_name: str, df_raw: Optional[pd.DataFrame] = None) -> Optional[TradePlan]:
+    df = fiyat_verisi_getir(ticker_name, "2y") if df_raw is None else df_raw.copy()
+    if df.empty or len(df) < 80:
+        return None
+    x = gostergeleri_hesapla(df)
+    son = x.iloc[-1]
+    onceki = x.iloc[-2]
+    fiyat = float(son["Close"])
+    atr = float(son["ATR"]) if pd.notna(son["ATR"]) else fiyat * 0.025
+    atr_pct = 100 * atr / fiyat if fiyat > 0 else 0
+    rsi = float(son["RSI"])
+    gunluk = 100 * (fiyat / float(onceki["Close"]) - 1)
+
+    puan = 0
+    nedenler: List[str] = []
+    uyarilar: List[str] = []
+
+    # Ucuzluk / dip bölgesi
+    if 28 <= rsi <= 42:
+        puan += 18
+        nedenler.append(f"RSI {rsi:.1f}: dip bölgesine yakın")
+    elif 42 < rsi <= 50:
+        puan += 10
+        nedenler.append(f"RSI {rsi:.1f}: nötr-alt bölge")
+    elif rsi < 28:
+        puan += 8
+        uyarilar.append("RSI aşırı satımda; düşüş henüz bitmemiş olabilir")
+    elif rsi >= 70:
+        puan -= 15
+        uyarilar.append("RSI aşırı alım bölgesinde")
+
+    bb_alt = float(son["BB_LOWER"]) if pd.notna(son["BB_LOWER"]) else fiyat
+    bb_orta = float(son["SMA20"]) if pd.notna(son["SMA20"]) else fiyat
+    if fiyat <= bb_alt * 1.03:
+        puan += 12
+        nedenler.append("Fiyat Bollinger alt bandına yakın")
+    if fiyat > bb_alt and float(onceki["Close"]) <= float(onceki["BB_LOWER"] if pd.notna(onceki["BB_LOWER"]) else onceki["Close"]):
+        puan += 8
+        nedenler.append("Bollinger alt bandından yukarı dönüş")
+
+    sma50 = float(son["SMA50"]) if pd.notna(son["SMA50"]) else fiyat
+    if abs(fiyat - sma50) / max(sma50, 1e-9) <= 0.04:
+        puan += 10
+        nedenler.append("50 günlük ortalamaya yakın destek")
+
+    # Dönüş teyitleri
+    macd_yukari = son["MACD"] > son["MACD_SIGNAL"] and onceki["MACD"] <= onceki["MACD_SIGNAL"]
+    if macd_yukari:
+        puan += 14
+        nedenler.append("MACD yukarı kesişim verdi")
+    elif son["MACD_HIST"] > onceki["MACD_HIST"]:
+        puan += 6
+        nedenler.append("MACD momentumu iyileşiyor")
+
+    stoch_yukari = son["STOCH_K"] > son["STOCH_D"] and onceki["STOCH_K"] <= onceki["STOCH_D"]
+    if stoch_yukari and son["STOCH_K"] < 45:
+        puan += 8
+        nedenler.append("Stokastik dipten yukarı kesişti")
+
+    vol_ratio = float(son["VOL_RATIO"]) if pd.notna(son["VOL_RATIO"]) else 0
+    if vol_ratio >= 1.5 and gunluk > 0:
+        puan += 12
+        nedenler.append(f"Pozitif günde hacim ortalamanın {vol_ratio:.1f} katı")
+    elif vol_ratio >= 1.1:
+        puan += 5
+        nedenler.append("Hacim ortalamanın üzerinde")
+
+    if _pozitif_uyumsuzluk(x["Close"], x["RSI"]):
+        puan += 12
+        nedenler.append("RSI pozitif uyumsuzluğu tespit edildi")
+
+    band_width = float(son["BB_WIDTH"]) if pd.notna(son["BB_WIDTH"]) else 1
+    if band_width < 0.12:
+        puan += 6
+        nedenler.append("Bollinger bantları sıkışmış")
+
+    if fiyat > float(son["EMA9"]):
+        puan += 5
+        nedenler.append("Fiyat EMA9 üzerine çıktı")
+    if fiyat > float(son["EMA20"]):
+        puan += 5
+        nedenler.append("Fiyat EMA20 üzerinde")
+
+    if float(son["ROC20"]) < -18:
+        puan -= 8
+        uyarilar.append("Son 20 günlük düşüş çok sert")
+    if atr_pct > 7:
+        puan -= 8
+        uyarilar.append("Oynaklık çok yüksek")
+
+    haber_skor, haber_notu = haber_duygu_skori(ticker_name)
+    puan += haber_skor * 2
+    if haber_skor != 0:
+        nedenler.append(f"{haber_notu}: {haber_skor:+d}")
+
+    dip_puani = int(max(0, min(100, puan)))
+
+    # Aşama sınıflandırması
+    teyit_sayisi = sum([
+        bool(macd_yukari),
+        bool(stoch_yukari),
+        bool(fiyat > float(son["EMA9"])),
+        bool(vol_ratio >= 1.2 and gunluk > 0),
+    ])
+    if dip_puani >= 75 and teyit_sayisi >= 2:
+        asama = "🟢 GÜÇLÜ DİP DÖNÜŞÜ"
+    elif dip_puani >= 60 and teyit_sayisi >= 1:
+        asama = "🟡 ALIM BÖLGESİ / TEYİTLİ"
+    elif dip_puani >= 50:
+        asama = "🟠 DİP ADAYI / TEYİT BEKLE"
+    else:
+        asama = "🔴 UYGUN DEĞİL"
+
+    destekler, direncler = destek_direnc_bul(x)
+    alt_destekler = [s for s in destekler if s < fiyat]
+    ust_direncler = [r for r in direncler if r > fiyat]
+    yakin_destek = max(alt_destekler) if alt_destekler else float(x["Low"].tail(20).min())
+
+    alim_alt = max(yakin_destek, fiyat - 0.55 * atr)
+    alim_ust = fiyat + 0.20 * atr
+
+    # Stop: destek altı ve ATR stopundan daha güvenli olanı
+    stop_destek = yakin_destek - 0.55 * atr
+    stop_atr = fiyat - max(1.6 * atr, fiyat * 0.025)
+    stop = min(stop_destek, stop_atr)
+    stop = max(stop, fiyat * 0.82)
+
+    risk = max(fiyat - stop, fiyat * 0.01)
+    # Direnç + ATR + Bollinger tabanlı hedef birleşimi
+    teknik_h1 = fiyat + 2.0 * risk
+    teknik_h2 = fiyat + 3.2 * risk
+    bb_hedef = max(bb_orta, fiyat + 1.2 * atr)
+    direnc1 = next((r for r in sorted(ust_direncler) if r >= fiyat + 1.2 * atr), None)
+    direnc2 = next((r for r in sorted(ust_direncler) if direnc1 is not None and r > direnc1 * 1.015), None)
+
+    hedef1_aday = [teknik_h1, bb_hedef]
+    if direnc1:
+        hedef1_aday.append(direnc1)
+    hedef_1 = float(np.median(hedef1_aday))
+    hedef_1 = max(hedef_1, fiyat + 1.5 * risk)
+
+    hedef2_aday = [teknik_h2, fiyat + 4 * atr]
+    if direnc2:
+        hedef2_aday.append(direnc2)
+    elif direnc1:
+        hedef2_aday.append(direnc1 + 2 * atr)
+    hedef_2 = float(np.median(hedef2_aday))
+    hedef_2 = max(hedef_2, hedef_1 + 0.8 * atr)
+
+    pot1 = 100 * (hedef_1 / fiyat - 1)
+    pot2 = 100 * (hedef_2 / fiyat - 1)
+    risk_pct = 100 * (fiyat - stop) / fiyat
+    rr = (hedef_1 - fiyat) / max(fiyat - stop, 1e-9)
+
+    # Güven: dip puanı + teyit + kabul edilebilir risk/kazanç
+    guven = dip_puani
+    guven += 5 if rr >= 2 else -8
+    guven += 5 if risk_pct <= 5 else -5
+    guven += min(teyit_sayisi * 3, 10)
+    sinyal_guveni = int(max(0, min(100, guven)))
+
+    tahmini_sure = "3–15 işlem günü" if atr_pct >= 4 else "5–25 işlem günü"
+
+    return TradePlan(
+        ticker=ticker_name,
+        fiyat=round(fiyat, 2),
+        dip_puani=dip_puani,
+        sinyal_guveni=sinyal_guveni,
+        asama=asama,
+        alim_alt=round(alim_alt, 2),
+        alim_ust=round(alim_ust, 2),
+        hedef_1=round(hedef_1, 2),
+        hedef_2=round(hedef_2, 2),
+        stop=round(stop, 2),
+        potansiyel_1=round(pot1, 2),
+        potansiyel_2=round(pot2, 2),
+        risk_yuzde=round(risk_pct, 2),
+        risk_kazanc=round(rr, 2),
+        atr=round(atr, 2),
+        atr_yuzde=round(atr_pct, 2),
+        rsi=round(rsi, 1),
+        gunluk_degisim=round(gunluk, 2),
+        tahmini_sure=tahmini_sure,
+        nedenler=nedenler[:8],
+        uyarilar=uyarilar[:5],
+    )
+
+
+def dinamik_trailing_stop(plan: TradePlan, pik_fiyat: float, guncel_fiyat: float) -> float:
+    # Kâr büyüdükçe stop sıkılaşır; oynaklık yüksekse daha geniş kalır.
+    kar_pct = 100 * (guncel_fiyat / max(plan.fiyat, 1e-9) - 1)
+    atr_carpani = 2.2
+    if kar_pct >= 15:
+        atr_carpani = 1.25
+    elif kar_pct >= 8:
+        atr_carpani = 1.55
+    elif kar_pct >= 4:
+        atr_carpani = 1.85
+    stop = pik_fiyat - atr_carpani * plan.atr
+    return round(max(plan.stop, stop), 2)
+
+
+def sinyal_kaydet(plan: TradePlan) -> None:
+    gecmis = veri_yukle(SINYAL_DOSYASI, [])
+    bugun = datetime.now().strftime("%Y-%m-%d")
+    anahtar = f"{plan.ticker}-{bugun}-{plan.asama}"
+    if any(k.get("anahtar") == anahtar for k in gecmis):
+        return
+    kayit = asdict(plan)
+    kayit.update({"anahtar": anahtar, "tarih": datetime.now().isoformat(timespec="minutes")})
+    gecmis.append(kayit)
+    veri_kaydet(SINYAL_DOSYASI, gecmis[-5000:])
+
+
+# -------------------------
+# Basit yürüyen backtest
+# -------------------------
+def backtest_yap(ticker_name: str, gun: int = 500, min_puan: int = 65) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    df = fiyat_verisi_getir(ticker_name, "5y")
+    if df.empty or len(df) < 250:
+        return pd.DataFrame(), {}
+
+    baslangic = max(220, len(df) - gun)
+    islemler: List[Dict[str, Any]] = []
+    pozisyon_bitis = -1
+
+    for i in range(baslangic, len(df) - 25):
+        if i <= pozisyon_bitis:
+            continue
+        parcali = df.iloc[: i + 1]
+        plan = islem_plani_hesapla(ticker_name, parcali)
+        if plan is None or plan.dip_puani < min_puan or "UYGUN DEĞİL" in plan.asama or "TEYİT BEKLE" in plan.asama:
+            continue
+
+        giris = float(df["Close"].iloc[i])
+        stop = plan.stop
+        hedef = plan.hedef_1
+        sonuc = "SÜRE DOLDU"
+        cikis = float(df["Close"].iloc[min(i + 20, len(df) - 1)])
+        cikis_i = min(i + 20, len(df) - 1)
+
+        for j in range(i + 1, min(i + 21, len(df))):
+            gun_low = float(df["Low"].iloc[j])
+            gun_high = float(df["High"].iloc[j])
+            # Aynı gün ikisi de görülürse ihtiyatlı olarak stop önce kabul edilir.
+            if gun_low <= stop:
+                sonuc, cikis, cikis_i = "STOP", stop, j
+                break
+            if gun_high >= hedef:
+                sonuc, cikis, cikis_i = "HEDEF", hedef, j
+                break
+
+        getiri = 100 * (cikis / giris - 1)
+        islemler.append({
+            "Tarih": df.index[i].strftime("%Y-%m-%d"),
+            "Giriş": round(giris, 2),
+            "Hedef": round(hedef, 2),
+            "Stop": round(stop, 2),
+            "Sonuç": sonuc,
+            "Çıkış": round(cikis, 2),
+            "Getiri %": round(getiri, 2),
+            "Dip Puanı": plan.dip_puani,
+        })
+        pozisyon_bitis = cikis_i
+
+    sonuc_df = pd.DataFrame(islemler)
+    if sonuc_df.empty:
+        return sonuc_df, {}
+
+    getiriler = sonuc_df["Getiri %"] / 100
+    toplam = len(sonuc_df)
+    kazanan = int((getiriler > 0).sum())
+    brut_kar = getiriler[getiriler > 0].sum()
+    brut_zarar = abs(getiriler[getiriler < 0].sum())
+    equity = (1 + getiriler).cumprod()
+    drawdown = equity / equity.cummax() - 1
+    ozet = {
+        "Toplam işlem": toplam,
+        "Başarı oranı %": round(100 * kazanan / toplam, 1),
+        "Ortalama getiri %": round(100 * getiriler.mean(), 2),
+        "Bileşik getiri %": round(100 * (equity.iloc[-1] - 1), 2),
+        "Kâr faktörü": round(brut_kar / brut_zarar, 2) if brut_zarar > 0 else math.inf,
+        "Maksimum düşüş %": round(100 * drawdown.min(), 2),
+    }
+    return sonuc_df, ozet
+
+
+# -------------------------
+# Alarm kontrolü
+# -------------------------
+def alarmlari_kontrol_et() -> List[str]:
+    alarmlar = veri_yukle(ALARMLAR_DOSYASI, [])
+    tetiklenenler: List[str] = []
+    degisti = False
+    for alarm in alarmlar:
+        if alarm.get("durum") != "AKTİF":
+            continue
+        fiyat = guncel_fiyat_bul(alarm["hisse"])
+        if fiyat is None:
+            continue
+        hedef = float(alarm["fiyat"])
+        yon = alarm["yon"]
+        tetik = (yon == "GEÇİNCE" and fiyat >= hedef) or (yon == "DÜŞÜNCE" and fiyat <= hedef)
+        if tetik:
+            alarm["durum"] = "TETİKLENDİ"
+            alarm["tetik_tarihi"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            alarm["tetik_fiyati"] = fiyat
+            metin = f"🚨 {alarm['hisse']} alarmı tetiklendi: {fiyat:.2f} TL ({yon} {hedef:.2f} TL)"
+            tetiklenenler.append(metin)
+            telegram_bildirim_gonder(metin)
+            degisti = True
+    if degisti:
+        veri_kaydet(ALARMLAR_DOSYASI, alarmlar)
+    return tetiklenenler
+
+
+# =========================================================
+# ARAYÜZ
+# =========================================================
 if "notified_stocks" not in st.session_state:
     st.session_state.notified_stocks = {}
 
+portfoy: Dict[str, Dict[str, float]] = veri_yukle(PORTFOY_DOSYASI, {})
+pik_hafiza: Dict[str, float] = veri_yukle(PIK_DOSYASI, {})
 
-# 🛡️ GÜVENLİ FİYAT ÇEKME FONKSİYONU
-def guncel_fiyat_bul(ticker_name):
-    try:
-        ticker = yf.Ticker(f"{ticker_name}.IS")
-        df = ticker.history(period="5d")
-        if not df.empty and "Close" in df.columns:
-            gecerli_fiyatlar = df["Close"].dropna()
-            if not gecerli_fiyatlar.empty:
-                return round(float(gecerli_fiyatlar.iloc[-1]), 2)
-        return None
-    except:
-        return None
-
-
-def yapay_zeka_haber_analizi(ticker_name):
-    try:
-        ticker = yf.Ticker(f"{ticker_name}.IS")
-        haberler = ticker.news
-        if not haberler:
-            return 0
-        pozitif = [
-            "halka arz",
-            "kazanc",
-            "kar ",
-            "buyume",
-            "ortaklik",
-            "sozlesme",
-            "ihale",
-            "rekor",
-            "alim",
-            "pozitif",
-            "yukselis",
-            "yeni is",
-            "kap",
-            "temettu",
-            "bedelsiz",
-            "yatirim",
-        ]
-        negatif = [
-            "zarar",
-            "dusus",
-            "kayip",
-            "dava",
-            "ceza",
-            "iptal",
-            "borc",
-            "temerrut",
-            "negatif",
-            "satis",
-            "risk",
-        ]
-        skor = 0
-        for h in haberler[:3]:
-            baslik = h.get("title", "").lower()
-            for p in pozitif:
-                if p in baslik:
-                    skor += 1
-            for n in negatif:
-                if n in baslik:
-                    skor -= 1
-        return 2 if skor >= 2 else (-2 if skor <= -2 else 0)
-    except:
-        return 0
-
-
-def canavar_teknik_analiz(ticker_name):
-    try:
-        ticker = yf.Ticker(f"{ticker_name}.IS")
-        df = ticker.history(period="100d", interval="1d")
-        if len(df) < 50:
-            return 0, False, 0.0, 50.0
-
-        close = df["Close"]
-        high = df["High"]
-        low = df["Low"]
-        volume = df["Volume"]
-        onay = 0
-
-        # RSI
-        delta = close.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / (loss + 1e-10)
-        rsi = 100 - (100 / (1 + rs))
-        current_rsi = float(rsi.iloc[-1])
-        if 35 < current_rsi < 65:
-            onay += 1
-
-        # MACD
-        macd = close.ewm(span=12).mean() - close.ewm(span=26).mean()
-        signal = macd.ewm(span=9).mean()
-        if macd.iloc[-1] > signal.iloc[-1]:
-            onay += 1
-
-        # Bollinger
-        if close.iloc[-1] > close.rolling(20).mean().iloc[-1]:
-            onay += 1
-
-        # Stokastik
-        low14 = low.rolling(14).min()
-        high14 = high.rolling(14).max()
-        k = 100 * ((close - low14) / (high14 - low14 + 1e-10))
-        d = k.rolling(3).mean()
-        if k.iloc[-1] > d.iloc[-1] and k.iloc[-1] < 80:
-            onay += 1
-
-        # Ortalamalar
-        if close.iloc[-1] > close.rolling(50).mean().iloc[-1]:
-            onay += 1
-        if close.iloc[-1] > close.ewm(9).mean().iloc[-1]:
-            onay += 1
-        if (
-            volume.iloc[-1] > volume.rolling(10).mean().iloc[-1]
-            and close.iloc[-1] > close.iloc[-2]
-        ):
-            onay += 1
-        if close.iloc[-1] > close.rolling(10).mean().iloc[-1]:
-            onay += 1
-
-        # Günlük Değişim Yüzdesi Hesaplama
-        gunluk_degisim = 0.0
-        if len(close) >= 2:
-            onceki_kapanis = float(close.iloc[-2])
-            guncel = float(close.iloc[-1])
-            if onceki_kapanis > 0:
-                gunluk_degisim = ((guncel - onceki_kapanis) / onceki_kapanis) * 100
-
-        # TEPEDEN ALMA / AŞIRI ISINMA KONTROLÜ
-        asiri_isinma = gunluk_degisim >= 3.5 or current_rsi >= 65.0
-
-        return onay, asiri_isinma, gunluk_degisim, current_rsi
-    except:
-        return 0, False, 0.0, 50.0
-
-
-# 💎 DİP AVCISI / SIKIŞAN PATLAMA ADAYLARI ANALİZİ
-def dip_avcisi_analizi(ticker_name):
-    try:
-        ticker = yf.Ticker(f"{ticker_name}.IS")
-        df = ticker.history(period="100d", interval="1d")
-        if len(df) < 50:
-            return False, 0, 0.0, 50.0
-
-        close = df["Close"]
-        volume = df["Volume"]
-
-        # RSI Hesaplama
-        delta = close.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / (loss + 1e-10)
-        rsi = 100 - (100 / (1 + rs))
-        current_rsi = float(rsi.iloc[-1])
-
-        # Bollinger Band Genişliği (Sıkışma Kontrolü)
-        sma20 = close.rolling(20).mean()
-        std20 = close.rolling(20).std()
-        upper_band = sma20 + (std20 * 2)
-        lower_band = sma20 - (std20 * 2)
-        band_width = ((upper_band - lower_band) / sma20).iloc[-1]
-
-        # Değişim
-        gunluk_degisim = 0.0
-        if len(close) >= 2:
-            gunluk_degisim = (
-                (close.iloc[-1] - close.iloc[-2]) / close.iloc[-2]
-            ) * 100
-
-        dip_skor = 0
-        # 1. RSI Ucuz/Dip Seviyede mi?
-        if 30 <= current_rsi <= 48:
-            dip_skor += 2
-        # 2. Bollinger Band İyice Sıkışmış mı? (Patlama Öncesi Sessizlik)
-        if band_width < 0.10:
-            dip_skor += 2
-        # 3. Sessizce Hacim Toplanıyor mu?
-        if volume.iloc[-1] > volume.rolling(10).mean().iloc[-1]:
-            dip_skor += 1
-        # 4. Fiyat 50 Günlük Desteğe Yakın mı?
-        sma50 = close.rolling(50).mean().iloc[-1]
-        if abs(close.iloc[-1] - sma50) / sma50 < 0.03:
-            dip_skor += 1
-
-        # Eğer dip skoru 3 ve üzerindeyse patlama adayıdır
-        is_dip_candidate = dip_skor >= 3
-
-        return is_dip_candidate, dip_skor, gunluk_degisim, current_rsi
-    except:
-        return False, 0, 0.0, 50.0
-
-
-# --- PORTFÖY YÖNETİMİ SIDEBAR ---
 st.sidebar.header("💼 Portföyüm & Takip")
-
-portfoy = veri_yukle(PORTFOY_DOSYASI, {})
-pik_hafiza = veri_yukle(PIK_DOSYASI, {})
-
 with st.sidebar.expander("➕ Portföye Hisse Ekle"):
-    yeni_hisse = st.selectbox("Hisse Seç", BIST_OTOMATIK_HAVUZ)
+    yeni_hisse = st.selectbox("Hisse seç", BIST_OTOMATIK_HAVUZ)
     adet = st.number_input("Adet", min_value=1, step=1, value=100)
-    maliyet = st.number_input(
-        "Maliyet (TL)", min_value=0.1, step=0.1, value=10.0
-    )
-    if st.button("Kaydet"):
-        portfoy[yeni_hisse] = {"adet": adet, "maliyet": maliyet}
+    maliyet = st.number_input("Maliyet (TL)", min_value=0.01, step=0.05, value=10.0)
+    if st.button("Portföye kaydet", use_container_width=True):
+        portfoy[yeni_hisse] = {"adet": int(adet), "maliyet": float(maliyet)}
         veri_kaydet(PORTFOY_DOSYASI, portfoy)
-        st.success(f"{yeni_hisse} portföye eklendi!")
+        st.success(f"{yeni_hisse} eklendi")
         st.rerun()
 
 with st.sidebar.expander("🗑️ Portföyden Hisse Sil"):
     if portfoy:
-        silinecek = st.selectbox("Silinecek Hisse", list(portfoy.keys()))
-        if st.button("Portföyden Çıkar"):
-            del portfoy[silinecek]
-            if silinecek in pik_hafiza:
-                del pik_hafiza[silinecek]
-                veri_kaydet(PIK_DOSYASI, pik_hafiza)
+        silinecek = st.selectbox("Silinecek hisse", sorted(portfoy))
+        if st.button("Portföyden çıkar", use_container_width=True):
+            portfoy.pop(silinecek, None)
+            pik_hafiza.pop(silinecek, None)
             veri_kaydet(PORTFOY_DOSYASI, portfoy)
-            st.warning(f"{silinecek} silindi.")
+            veri_kaydet(PIK_DOSYASI, pik_hafiza)
             st.rerun()
     else:
-        st.write("Silinecek hisse yok.")
+        st.info("Portföy boş")
 
-# --- CANLI PORTFÖY ANALİZİ ---
 st.sidebar.markdown("---")
-st.sidebar.subheader("📊 Canlı Portföy Durumu")
-
-toplam_deger = 0.0
-toplam_maliyet_genel = 0.0
+st.sidebar.subheader("📊 Canlı Portföy")
+toplam_deger = toplam_maliyet = 0.0
+for h, bilgi in portfoy.items():
+    fiyat = guncel_fiyat_bul(h) or float(bilgi["maliyet"])
+    adet_b = float(bilgi["adet"])
+    maliyet_b = float(bilgi["maliyet"])
+    deger = fiyat * adet_b
+    maliyet_toplam = maliyet_b * adet_b
+    kz = deger - maliyet_toplam
+    kz_pct = 100 * kz / maliyet_toplam if maliyet_toplam else 0
+    toplam_deger += deger
+    toplam_maliyet += maliyet_toplam
+    st.sidebar.markdown(f"**{h}** — {fiyat:.2f} TL | {kz_pct:+.2f}%")
 
 if portfoy:
-    for h, bilgi in list(portfoy.items()):
-        fiyat = guncel_fiyat_bul(h)
-        maliyet_b = float(bilgi["maliyet"])
-        adet_b = float(bilgi["adet"])
+    net = toplam_deger - toplam_maliyet
+    st.sidebar.metric("Toplam değer", f"{tr_fiyat(toplam_deger)} TL")
+    st.sidebar.metric("Net K/Z", f"{tr_fiyat(net)} TL", f"{100*net/toplam_maliyet:+.2f}%" if toplam_maliyet else "0%")
 
-        if fiyat is None:
-            fiyat = maliyet_b
-
-        anlik_deger = fiyat * adet_b
-        toplam_maliyet = maliyet_b * adet_b
-
-        toplam_deger += anlik_deger
-        toplam_maliyet_genel += toplam_maliyet
-
-        kz_tl = anlik_deger - toplam_maliyet
-        kz_yuzde = (
-            (kz_tl / toplam_maliyet) * 100 if toplam_maliyet > 0 else 0.0
-        )
-
-        renk = "green" if kz_tl >= 0 else "red"
-        ok = "🔺" if kz_tl >= 0 else "🔻"
-
-        st.sidebar.markdown(
-            f"**{h}** | <span style='color:{renk}'>{ok} {kz_yuzde:+.2f}%</span>",
-            unsafe_allow_html=True,
-        )
-        st.sidebar.write(
-            f"Fiyat: {fiyat:.2f} TL | Maliyet: {maliyet_b:.2f} TL"
-        )
-        st.sidebar.write(f"Net K/Z: {kz_tl:+.2f} TL")
-        st.sidebar.write("---")
-
-    net_kz_genel = toplam_deger - toplam_maliyet_genel
-    yuzde_kz_genel = (
-        (net_kz_genel / toplam_maliyet_genel) * 100
-        if toplam_maliyet_genel > 0
-        else 0.0
-    )
-
-    st.sidebar.subheader("🏆 Toplam Portföy Özeti")
-    st.sidebar.metric("Toplam Değer", f"{toplam_deger:,.2f} TL")
-    st.sidebar.metric(
-        "Toplam Net Kâr/Zarar", f"{net_kz_genel:,.2f} TL", f"{yuzde_kz_genel:+.2f}%"
-    )
-else:
-    st.sidebar.write("Portföyünüz henüz boş.")
-
-# --- ANA EKRAN ---
-st.title("🛡️ Canavar AI Trade Terminal v3.3")
-
-# ⏱️ BAŞLIK ALTINDAKİ SATIR VE MİNİMAL CANLI SAYACIN YERİ
-reset_key = datetime.now().strftime("%Y%m%d%H%M%S")
-
+st.title("🛡️ Canavar AI Trade Terminal v4.0")
 col_sub1, col_sub2 = st.columns([0.82, 0.18])
-
 with col_sub1:
-    st.caption(
-        "⚡ Otomatik Yenileme Aktif (1 Dk) | 🎯 Pik Seviye & Trailing Stop Koruma"
-        " | 🛑 Tepeden Alma Filtresi"
-    )
-
+    st.caption("Dip dönüşü • hedef fiyat • ATR tabanlı dinamik stop • alarm • backtest")
 with col_sub2:
+    reset_key = datetime.now().strftime("%Y%m%d%H%M%S")
     components.html(
         f"""
-        <div style="font-family: Arial, sans-serif; display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 0; margin-top: -5px;">
-            <span style="color: #888; font-size: 11px; white-space: nowrap;">Sonraki Yenileme:</span>
-            <span id="countdown_{reset_key}" style="font-size: 13px; font-weight: bold; color: #00e676; background: #1f232a; padding: 2px 8px; border-radius: 4px; border: 1px solid #333;">60s</span>
+        <div style="font-family:Arial;display:flex;justify-content:flex-end;gap:6px;align-items:center">
+          <span style="color:#888;font-size:11px">Yenileme:</span>
+          <span id="countdown_{reset_key}" style="font-size:13px;font-weight:bold;background:#1f232a;padding:2px 8px;border-radius:4px">60s</span>
         </div>
         <script>
-            var timeLeft = 60;
-            var elem = document.getElementById('countdown_{reset_key}');
-            var timerId = setInterval(countdown, 1000);
-            function countdown() {{
-                if (timeLeft <= 0) {{
-                    elem.innerHTML = "Yenileniyor...";
-                    elem.style.color = "#ff5252";
-                    clearInterval(timerId);
-                }} else {{
-                    elem.innerHTML = timeLeft + 's';
-                    timeLeft--;
-                }}
-            }}
+          let t=60; const e=document.getElementById('countdown_{reset_key}');
+          const id=setInterval(()=>{{if(t<=0){{e.innerHTML='Yenileniyor...';clearInterval(id)}}else{{e.innerHTML=t+'s';t--;}}}},1000);
         </script>
         """,
         height=32,
     )
 
-t1, t2, t3 = st.tabs(
-    ["🚀 Canavar AI Hibrit Süzgeç", "📖 Temel Analiz Defteri", "🚨 Akıllı Alarmlar"]
+st.warning(
+    "Bu yazılım yatırım danışmanlığı değildir. Dip, hedef ve olasılık değerleri geçmiş fiyat/hacim verilerinden üretilen karar destek tahminleridir; kesin sonuç vermez."
 )
 
+for mesaj in alarmlari_kontrol_et():
+    st.error(mesaj)
+
+t1, t2, t3, t4, t5 = st.tabs([
+    "🎯 Dipten Al / Pikten Sat",
+    "💼 Portföy Koruma",
+    "🧪 Backtest",
+    "📖 Temel Analiz",
+    "🚨 Alarmlar",
+])
+
 with t1:
-    st.header("📯 Portföydeki Hisselerin Canavar Yapay Zeka Raporu")
+    st.header("🎯 BIST Dip Dönüşü Tarayıcısı")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        minimum_puan = st.slider("Minimum dip puanı", 40, 90, 60)
+    with c2:
+        sadece_teyitli = st.checkbox("Yalnızca teyitli sinyaller", value=True)
+    with c3:
+        maksimum_hisse = st.number_input("En fazla sonuç", 5, 50, 20)
 
-    portfoy_tablosu = []
-    pik_sat_uyarilari = []
+    if st.button("🔎 Tüm havuzu tara", type="primary", use_container_width=True):
+        bar = st.progress(0)
+        sonuclar: List[Dict[str, Any]] = []
+        planlar: Dict[str, TradePlan] = {}
+        for i, h in enumerate(BIST_OTOMATIK_HAVUZ):
+            bar.progress((i + 1) / len(BIST_OTOMATIK_HAVUZ))
+            plan = islem_plani_hesapla(h)
+            if plan is None or plan.dip_puani < minimum_puan:
+                continue
+            if sadece_teyitli and ("TEYİT BEKLE" in plan.asama or "UYGUN DEĞİL" in plan.asama):
+                continue
+            sinyal_kaydet(plan)
+            planlar[h] = plan
+            sonuclar.append({
+                "Hisse": h,
+                "Fiyat": f"{plan.fiyat:.2f}",
+                "Dip Puanı": plan.dip_puani,
+                "Güven": plan.sinyal_guveni,
+                "Aşama": plan.asama,
+                "Alım Bölgesi": f"{plan.alim_alt:.2f}–{plan.alim_ust:.2f}",
+                "Hedef 1": f"{plan.hedef_1:.2f} (%{plan.potansiyel_1:.1f})",
+                "Hedef 2": f"{plan.hedef_2:.2f} (%{plan.potansiyel_2:.1f})",
+                "Stop": f"{plan.stop:.2f} (-%{plan.risk_yuzde:.1f})",
+                "R/K": plan.risk_kazanc,
+                "RSI": plan.rsi,
+            })
+        bar.empty()
+        sonuclar = sorted(sonuclar, key=lambda z: (z["Güven"], z["Dip Puanı"], z["R/K"]), reverse=True)[: int(maksimum_hisse)]
+        st.session_state["tarama_sonuclari"] = sonuclar
+        st.session_state["tarama_planlari"] = {k: asdict(v) for k, v in planlar.items()}
 
-    for h in portfoy.keys():
-        fiyat = guncel_fiyat_bul(h)
-        tech, asiri_isinma, degisim, current_rsi = canavar_teknik_analiz(h)
-        ai = yapay_zeka_haber_analizi(h)
-        bilesik = tech + ai
-
-        fiyat_b = fiyat if fiyat is not None else float(portfoy[h]["maliyet"])
-        fiyat_str = f"{fiyat_b:.2f}"
-
-        # 🎯 KALICI PİK FİYAT GÜNCELLEME (JSON)
-        mevcut_pik = pik_hafiza.get(h, fiyat_b)
-        if fiyat_b > mevcut_pik or h not in pik_hafiza:
-            mevcut_pik = fiyat_b
-            pik_hafiza[h] = mevcut_pik
-            veri_kaydet(PIK_DOSYASI, pik_hafiza)
-            st.session_state.notified_stocks[h] = False
-
-        zirve_fiyat = pik_hafiza.get(h, fiyat_b)
-        dusus_yuzdesi = (
-            ((zirve_fiyat - fiyat_b) / zirve_fiyat) * 100
-            if zirve_fiyat > 0
-            else 0.0
-        )
-
-        # 🚨 SERT SİNYAL MANTIĞI: DÜŞÜŞ %1.5 VE ÜZERİYSE DOĞRUDAN SAT!
-        if dusus_yuzdesi >= 1.5:
-            sinyal = "🚨 SAT / PİK DÖNÜŞÜ"
-            mesaj_metni = f"🚨 **CANAVAR AI PİK SAT UYARISI!**\n\n📌 **Hisse:** {h}\n💰 **Güncel Fiyat:** {fiyat_b:.2f} TL\n🔝 **Gördüğü Zirve:** {zirve_fiyat:.2f} TL\n📉 **Zirveden Düşüş:** %{dusus_yuzdesi:.2f}\n📊 **Birleşik Skor:** {bilesik}\n\n⚠️ Kârı korumak için satışı değerlendir!"
-
-            pik_sat_uyarilari.append(
-                f"⚠️ **{h}** zirveden (%{dusus_yuzdesi:.2f}) düştü! (Pik:"
-                f" {zirve_fiyat:.2f} TL ➔ Güncel: {fiyat_b:.2f} TL)"
+    sonuclar = st.session_state.get("tarama_sonuclari", [])
+    if sonuclar:
+        st.success(f"{len(sonuclar)} aday listelendi")
+        st.dataframe(pd.DataFrame(sonuclar), use_container_width=True, hide_index=True)
+        secili = st.selectbox("Detayını göster", [s["Hisse"] for s in sonuclar])
+        plan_dict = st.session_state.get("tarama_planlari", {}).get(secili)
+        if plan_dict:
+            p = TradePlan(**plan_dict)
+            st.subheader(f"{p.ticker} işlem planı")
+            a, b, c, d = st.columns(4)
+            a.metric("Dip puanı", f"{p.dip_puani}/100")
+            b.metric("Sinyal güveni", f"{p.sinyal_guveni}/100")
+            c.metric("Hedef 1 potansiyeli", f"%{p.potansiyel_1:.1f}")
+            d.metric("Risk/Kazanç", f"1:{p.risk_kazanc:.2f}")
+            st.info(
+                f"**{p.asama}**  |  Alım: **{p.alim_alt:.2f}–{p.alim_ust:.2f} TL**  |  "
+                f"Hedef 1: **{p.hedef_1:.2f} TL**  |  Hedef 2: **{p.hedef_2:.2f} TL**  |  "
+                f"Stop: **{p.stop:.2f} TL**  |  Tahmini süre: **{p.tahmini_sure}**"
             )
-
-            if not st.session_state.notified_stocks.get(h, False):
-                telegram_bildirim_gonder(mesaj_metni)
-                st.session_state.notified_stocks[h] = True
-
-        elif bilesik >= 7:
-            sinyal = "🟢 CANAVAR AL"
-        elif bilesik >= 4:
-            sinyal = "🟡 NÖTR / BEKLE"
-        else:
-            sinyal = "🔴 RİSKLİ / SAT"
-
-        ai_aciklama = (
-            "🟢 Pozitif Akış"
-            if ai > 0
-            else ("🔴 Negatif Akış" if ai < 0 else "🟡 Nötr Akış (Aktif Haber Yok)")
-        )
-
-        portfoy_tablosu.append({
-            "Hisse": h,
-            "Fiyat (TL)": fiyat_str,
-            "Pik Fiyat (TL)": f"{zirve_fiyat:.2f}",
-            "Pikten Düşüş": f"%{dusus_yuzdesi:.2f}",
-            "Teknik Skor (Max 8)": f"{tech} Onay",
-            "AI Haber Katkısı": f"{ai:+.0f} Pts",
-            "Canlı AI Haber/KAP Durumu": ai_aciklama,
-            "BİRLEŞİK GÜÇ SKORU": bilesik,
-            "İŞLEM SİNYALİ": sinyal,
-        })
-
-    if pik_sat_uyarilari:
-        for uyari in pik_sat_uyarilari:
-            st.error(uyari)
-
-    if portfoy_tablosu:
-        st.table(pd.DataFrame(portfoy_tablosu))
+            st.markdown("**Neden seçildi?**")
+            for n in p.nedenler:
+                st.write(f"• {n}")
+            if p.uyarilar:
+                st.markdown("**Risk uyarıları**")
+                for u in p.uyarilar:
+                    st.write(f"• {u}")
     else:
-        st.info("Portföyünüzde hisse bulunmadığı için analiz yapılamadı.")
-
-    st.markdown("---")
-    st.header("🔥 BIST 75 Yapay Zeka & Teknik Tarama Laboratuvarı")
-
-    # İKİ FARKLI TARAMA SEÇENEĞİ BUTONLARI
-    col_btn1, col_btn2 = st.columns(2)
-    with col_btn1:
-        tara_ralli = st.button("🚀 1. Trend & Ralli Fırsatlarını Tara")
-    with col_btn2:
-        tara_dip = st.button("💎 2. Dipte Sıkışan Patlama Adaylarını Tara")
-
-    # 🚀 RALLİ TARAMASI
-    if tara_ralli:
-        tarama_bar = st.progress(0)
-        firsatlar = []
-
-        for index, h in enumerate(BIST_OTOMATIK_HAVUZ):
-            tarama_bar.progress((index + 1) / len(BIST_OTOMATIK_HAVUZ))
-            if h in portfoy:
-                continue
-
-            fiyat = guncel_fiyat_bul(h)
-            if not fiyat:
-                continue
-
-            tech, asiri_isinma, degisim, current_rsi = canavar_teknik_analiz(h)
-            if tech >= 4:
-                ai = yapay_zeka_haber_analizi(h)
-                bilesik = tech + ai
-
-                if asiri_isinma:
-                    durum_notu = f"🔥 AŞIRI ISINDI (Günlük: %{degisim:+.2f} | RSI: {current_rsi:.1f})"
-                elif bilesik >= 7:
-                    durum_notu = "🟢 CANAVAR RALLİ FIRSATI"
-                else:
-                    durum_notu = "🟡 NÖTR / TAKİP"
-
-                if bilesik >= 7:
-                    firsatlar.append({
-                        "Hisse": h,
-                        "Güncel Fiyat": f"{fiyat:.2f} TL",
-                        "Günlük Değişim": f"%{degisim:+.2f}",
-                        "RSI Değeri": f"{current_rsi:.1f}",
-                        "Teknik Onay": f"{tech}/8",
-                        "AI Haber Gücü": f"{ai:+.0f}",
-                        "Toplam Skor": bilesik,
-                        "ALIM DURUMU": durum_notu,
-                    })
-
-        tarama_bar.empty()
-        if firsatlar:
-            st.success(
-                f"🚀 Yapay Zeka ve Trend Filtrelerini Aşan {len(firsatlar)}"
-                " Hisse Bulundu!"
-            )
-            df_firsat = pd.DataFrame(firsatlar)
-            df_firsat["Isinma_Sira"] = df_firsat["ALIM DURUMU"].apply(
-                lambda x: 1 if "🔥 AŞIRI ISINDI" in x else 0
-            )
-            df_firsat = df_firsat.sort_values(
-                by=["Isinma_Sira", "Toplam Skor"], ascending=[True, False]
-            ).drop(columns=["Isinma_Sira"])
-
-            st.dataframe(df_firsat)
-        else:
-            st.warning("Kriterlere uyan yeni bir ralli fırsatı tespit edilemedi.")
-
-    # 💎 DİP AVCISI TARAMASI
-    if tara_dip:
-        tarama_bar_dip = st.progress(0)
-        dip_firsatlari = []
-
-        for index, h in enumerate(BIST_OTOMATIK_HAVUZ):
-            tarama_bar_dip.progress((index + 1) / len(BIST_OTOMATIK_HAVUZ))
-            if h in portfoy:
-                continue
-
-            fiyat = guncel_fiyat_bul(h)
-            if not fiyat:
-                continue
-
-            is_candidate, dip_skor, degisim, current_rsi = dip_avcisi_analizi(h)
-
-            if is_candidate:
-                ai = yapay_zeka_haber_analizi(h)
-                dip_firsatlari.append({
-                    "Hisse": h,
-                    "Güncel Fiyat": f"{fiyat:.2f} TL",
-                    "Günlük Değişim": f"%{degisim:+.2f}",
-                    "RSI Değeri (Ucuzluk)": f"{current_rsi:.1f}",
-                    "Sıkışma & Dip Skoru": f"{dip_skor}/6",
-                    "AI Haber Gücü": f"{ai:+.0f}",
-                    "POTANSİYEL DURUMU": "💎 PATLAMA ADAYI / DİP SIKIŞMASI",
-                })
-
-        tarama_bar_dip.empty()
-        if dip_firsatlari:
-            st.success(
-                f"💎 Dipte Sıkışmış ve Pik Yapmaya Hazır {len(dip_firsatlari)}"
-                " Potansiyel Hisse Bulundu!"
-            )
-            df_dip = pd.DataFrame(dip_firsatlari).sort_values(
-                by="Sıkışma & Dip Skoru", ascending=False
-            )
-            st.dataframe(df_dip)
-        else:
-            st.warning("Şu anda dip bölgesinde dilleşen hisse tespiti yapılamadı.")
+        st.info("Tarama butonuna basın. İlk tarama veri indirdiği için biraz ağır çalışabilir.")
 
 with t2:
-    st.subheader("📖 Şirket Temel Analiz Defteri")
-    secilen_temel = st.selectbox("Analiz Edilecek Şirket", BIST_OTOMATIK_HAVUZ)
-    if st.button("Temel Verileri Çek"):
-        try:
-            t_obj = yf.Ticker(f"{secilen_temel}.IS")
-            inf = t_obj.info
-            st.write(f"### {secilen_temel} Genel Bilgiler")
-            st.write(inf.get("longBusinessSummary", "Özet bilgi yok."))
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric(
-                    "Fiyat/Kazanç (F/K)",
-                    round(inf.get("trailingPE", 0), 2)
-                    if inf.get("trailingPE")
-                    else "N/A",
-                )
-                st.metric(
-                    "Piyasa Değeri / Defter Değeri (PD/DD)",
-                    round(inf.get("priceToBook", 0), 2)
-                    if inf.get("priceToBook")
-                    else "N/A",
-                )
-            with col2:
-                st.metric(
-                    "Hisse Başına Kazanç (EPS)",
-                    round(inf.get("trailingEps", 0), 2)
-                    if inf.get("trailingEps")
-                    else "N/A",
-                )
-                st.metric(
-                    "Temettü Verimi (%)",
-                    f"{round(inf.get('dividendYield', 0)*100, 2)}%"
-                    if inf.get("dividendYield")
-                    else "Ödemiyor",
-                )
-        except:
-            st.error("Temel analiz verileri çekilirken bir hata oluştu.")
+    st.header("💼 Portföyde Pikten Satış ve Kâr Koruma")
+    if not portfoy:
+        st.info("Önce yan menüden portföye hisse ekleyin.")
+    else:
+        sat_uyarilari = []
+        satirlar = []
+        for h, bilgi in portfoy.items():
+            plan = islem_plani_hesapla(h)
+            fiyat = guncel_fiyat_bul(h)
+            if plan is None or fiyat is None:
+                continue
+            eski_pik = float(pik_hafiza.get(h, fiyat))
+            pik = max(eski_pik, fiyat)
+            pik_hafiza[h] = pik
+            dinamik_stop = dinamik_trailing_stop(plan, pik, fiyat)
+            pikten_dusus = 100 * (pik - fiyat) / pik if pik else 0
+            hedef1_gecti = pik >= plan.hedef_1
+            hedef2_gecti = pik >= plan.hedef_2
+            if fiyat <= dinamik_stop:
+                sinyal = "🚨 SAT / KÂRI KORU"
+                sat_uyarilari.append(f"{h}: {fiyat:.2f} TL, dinamik stop {dinamik_stop:.2f} TL")
+                anahtar = f"{h}-{dinamik_stop:.2f}"
+                if not st.session_state.notified_stocks.get(anahtar):
+                    telegram_bildirim_gonder(
+                        f"🚨 {h} KÂR KORUMA UYARISI\nGüncel: {fiyat:.2f} TL\nPik: {pik:.2f} TL\nDinamik stop: {dinamik_stop:.2f} TL\nPikten düşüş: %{pikten_dusus:.2f}"
+                    )
+                    st.session_state.notified_stocks[anahtar] = True
+            elif hedef2_gecti:
+                sinyal = "🟣 HEDEF 2 GÖRÜLDÜ / STOP SIKILAŞTIR"
+            elif hedef1_gecti:
+                sinyal = "🟢 HEDEF 1 GÖRÜLDÜ / KISMİ KÂR"
+            else:
+                sinyal = "🟡 POZİSYONU İZLE"
+            satirlar.append({
+                "Hisse": h,
+                "Güncel": f"{fiyat:.2f}",
+                "Maliyet": f"{float(bilgi['maliyet']):.2f}",
+                "Pik": f"{pik:.2f}",
+                "Pikten Düşüş": f"%{pikten_dusus:.2f}",
+                "Hedef 1": f"{plan.hedef_1:.2f}",
+                "Hedef 2": f"{plan.hedef_2:.2f}",
+                "Dinamik Stop": f"{dinamik_stop:.2f}",
+                "Sinyal": sinyal,
+            })
+        veri_kaydet(PIK_DOSYASI, pik_hafiza)
+        for u in sat_uyarilari:
+            st.error(u)
+        if satirlar:
+            st.dataframe(pd.DataFrame(satirlar), use_container_width=True, hide_index=True)
+        if st.button("Portföy piklerini güncel fiyata sıfırla"):
+            yeni_pikler = {h: (guncel_fiyat_bul(h) or float(portfoy[h]["maliyet"])) for h in portfoy}
+            veri_kaydet(PIK_DOSYASI, yeni_pikler)
+            st.success("Pikler sıfırlandı")
+            st.rerun()
 
 with t3:
-    st.subheader("🚨 Akıllı Fiyat Alarmları")
+    st.header("🧪 Geçmiş Veri Backtest")
+    st.caption("Aynı gün hedef ve stop birlikte görülürse ihtiyatlı şekilde stop önce kabul edilir.")
+    bc1, bc2, bc3 = st.columns(3)
+    with bc1:
+        bt_hisse = st.selectbox("Backtest hissesi", BIST_OTOMATIK_HAVUZ, key="bt_hisse")
+    with bc2:
+        bt_gun = st.selectbox("Test dönemi", [250, 500, 750], index=1)
+    with bc3:
+        bt_puan = st.slider("Minimum sinyal puanı", 50, 85, 65, key="bt_puan")
+    if st.button("Backtest çalıştır", type="primary"):
+        with st.spinner("Geçmiş sinyaller test ediliyor..."):
+            bt_df, ozet = backtest_yap(bt_hisse, int(bt_gun), int(bt_puan))
+        if bt_df.empty:
+            st.warning("Bu koşullarda yeterli işlem bulunamadı.")
+        else:
+            cols = st.columns(len(ozet))
+            for col, (k, v) in zip(cols, ozet.items()):
+                col.metric(k, v)
+            st.dataframe(bt_df.sort_values("Tarih", ascending=False), use_container_width=True, hide_index=True)
+            getiri_serisi = (1 + bt_df["Getiri %"] / 100).cumprod()
+            st.line_chart(pd.DataFrame({"Sermaye çarpanı": getiri_serisi.values}, index=pd.to_datetime(bt_df["Tarih"])))
+
+with t4:
+    st.header("📖 Şirket Temel Analiz Defteri")
+    secilen_temel = st.selectbox("Şirket", BIST_OTOMATIK_HAVUZ, key="temel_hisse")
+    if st.button("Temel verileri çek"):
+        inf = temel_veri_getir(secilen_temel)
+        if not inf:
+            st.error("Temel veri alınamadı")
+        else:
+            st.write(f"### {secilen_temel}")
+            st.write(inf.get("longBusinessSummary", "Özet bilgi yok."))
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("F/K", round(inf.get("trailingPE"), 2) if inf.get("trailingPE") else "N/A")
+            c2.metric("PD/DD", round(inf.get("priceToBook"), 2) if inf.get("priceToBook") else "N/A")
+            c3.metric("ROE", f"%{100*inf.get('returnOnEquity'):.1f}" if inf.get("returnOnEquity") else "N/A")
+            c4.metric("Borç/Özsermaye", round(inf.get("debtToEquity"), 1) if inf.get("debtToEquity") else "N/A")
+            c5, c6, c7, c8 = st.columns(4)
+            c5.metric("Net kâr marjı", f"%{100*inf.get('profitMargins'):.1f}" if inf.get("profitMargins") else "N/A")
+            c6.metric("Ciro büyümesi", f"%{100*inf.get('revenueGrowth'):.1f}" if inf.get("revenueGrowth") else "N/A")
+            c7.metric("Kâr büyümesi", f"%{100*inf.get('earningsGrowth'):.1f}" if inf.get("earningsGrowth") else "N/A")
+            c8.metric("Temettü verimi", f"%{100*inf.get('dividendYield'):.2f}" if inf.get("dividendYield") else "Yok/N/A")
+
+with t5:
+    st.header("🚨 Akıllı Fiyat Alarmları")
     alarmlar = veri_yukle(ALARMLAR_DOSYASI, [])
-
-    col_a1, col_a2, col_a3 = st.columns(3)
-    with col_a1:
-        a_hisse = st.selectbox("Alarm Hissesi", BIST_OTOMATIK_HAVUZ, key="alarm_h")
-    with col_a2:
-        a_fiyat = st.number_input(
-            "Hedef Fiyat (TL)", min_value=0.1, step=0.05, value=20.0
-        )
-    with col_a3:
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        a_hisse = st.selectbox("Alarm hissesi", BIST_OTOMATIK_HAVUZ, key="alarm_h")
+    with a2:
+        a_fiyat = st.number_input("Hedef fiyat (TL)", min_value=0.01, step=0.05, value=20.0)
+    with a3:
         a_yon = st.selectbox("Yön", ["GEÇİNCE", "DÜŞÜNCE"])
-
-    if st.button("Alarmı Kur"):
+    if st.button("Alarmı kur"):
         alarmlar.append({
             "hisse": a_hisse,
-            "fiyat": a_fiyat,
+            "fiyat": float(a_fiyat),
             "yon": a_yon,
             "durum": "AKTİF",
             "tarih": datetime.now().strftime("%Y-%m-%d %H:%M"),
         })
         veri_kaydet(ALARMLAR_DOSYASI, alarmlar)
-        st.success("Alarm başarıyla kaydedildi!")
+        st.success("Alarm kaydedildi")
         st.rerun()
-
     if alarmlar:
-        st.write("### Mevcut Alarmlarınız")
-        df_alarm = pd.DataFrame(alarmlar)
-        st.table(df_alarm)
-        if st.button("Tüm Alarmları Temizle"):
+        st.dataframe(pd.DataFrame(alarmlar), use_container_width=True, hide_index=True)
+        if st.button("Tüm alarmları temizle"):
             veri_kaydet(ALARMLAR_DOSYASI, [])
-            st.warning("Bütün alarmlar sıfırlandı.")
             st.rerun()
+    else:
+        st.info("Kurulu alarm yok")
+
+st.markdown("---")
+st.caption(
+    "Not: Hedefler garanti değildir. Gerçek işlem öncesinde komisyon, kayma, likidite, devre kesici ve veri gecikmesini ayrıca dikkate alın."
+)
