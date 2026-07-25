@@ -17,12 +17,12 @@ from streamlit_autorefresh import st_autorefresh
 import yfinance as yf
 
 # =========================================================
-# CANAVAR AI TRADE TERMINAL v4.0
+# CANAVAR AI TRADE TERMINAL v5.0
 # Dip dönüşü + hedef fiyat + dinamik stop + backtest
 # =========================================================
 
 st.set_page_config(
-    page_title="Canavar AI Trade Terminal v4.0",
+    page_title="Canavar AI Trade Terminal v5.0",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -35,6 +35,7 @@ PORTFOY_DOSYASI = DATA_DIR / "portfoy_data.json"
 PIK_DOSYASI = DATA_DIR / "pik_fiyatlar.json"
 ALARMLAR_DOSYASI = DATA_DIR / "alarmlar_data.json"
 SINYAL_DOSYASI = DATA_DIR / "sinyal_gecmisi.json"
+BILDIRIM_DOSYASI = DATA_DIR / "bildirim_merkezi.json"
 
 # Tokenı doğrudan koda yazmayın.
 # Windows PowerShell örneği:
@@ -128,6 +129,51 @@ def telegram_bildirim_gonder(mesaj: str) -> bool:
 
 def tr_fiyat(x: float) -> str:
     return f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def bildirim_ekle(tur: str, baslik: str, mesaj: str, anahtar: str = "") -> None:
+    bildirimler = veri_yukle(BILDIRIM_DOSYASI, [])
+    if anahtar and any(b.get("anahtar") == anahtar for b in bildirimler[-300:]):
+        return
+    bildirimler.append({
+        "tarih": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "tur": tur, "baslik": baslik, "mesaj": mesaj, "anahtar": anahtar,
+    })
+    veri_kaydet(BILDIRIM_DOSYASI, bildirimler[-1000:])
+
+
+@st.cache_data(ttl=21_600, show_spinner=False)
+def bist_tum_semboller_getir() -> List[str]:
+    """TradingView BIST tarayıcısından aktif sembolleri alır; başarısızsa yerel havuza döner."""
+    url = "https://scanner.tradingview.com/turkey/scan"
+    payload = {
+        "filter": [{"left": "exchange", "operation": "equal", "right": "BIST"},
+                   {"left": "type", "operation": "equal", "right": "stock"}],
+        "options": {"lang": "tr"},
+        "markets": ["turkey"],
+        "symbols": {"query": {"types": []}, "tickers": []},
+        "columns": ["name", "description"],
+        "range": [0, 1000],
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=20)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        semboller = []
+        for item in data:
+            s = str(item.get("s", "")).replace("BIST:", "").strip().upper()
+            if s and s.isalnum() and len(s) <= 8:
+                semboller.append(s)
+        return sorted(set(semboller)) or BIST_OTOMATIK_HAVUZ
+    except Exception:
+        return BIST_OTOMATIK_HAVUZ
+
+
+def model_olasiligi(plan: TradePlan) -> int:
+    puan = 25 + 0.48 * plan.sinyal_guveni + 0.12 * plan.dip_puani
+    puan += 5 if plan.risk_kazanc >= 2 else -5
+    puan -= max(0, plan.atr_yuzde - 5) * 1.5
+    return int(max(35, min(92, round(puan))))
 
 
 # -------------------------
@@ -589,6 +635,41 @@ def islem_plani_hesapla(ticker_name: str, df_raw: Optional[pd.DataFrame] = None)
     )
 
 
+def benzer_formasyon_analizi(ticker_name: str, plan: TradePlan, ufuk: int = 15) -> Dict[str, Any]:
+    df = fiyat_verisi_getir(ticker_name, "5y")
+    if df.empty or len(df) < 260:
+        return {}
+    x = gostergeleri_hesapla(df).dropna(subset=["RSI", "ATR_PCT", "VOL_RATIO", "MACD_HIST"])
+    if len(x) < 220:
+        return {}
+    adaylar = []
+    for i in range(80, len(x) - ufuk):
+        rsi = float(x["RSI"].iloc[i])
+        atrp = float(x["ATR_PCT"].iloc[i])
+        vol = float(x["VOL_RATIO"].iloc[i])
+        macd_up = float(x["MACD_HIST"].iloc[i]) > float(x["MACD_HIST"].iloc[i-1])
+        sim = abs(rsi-plan.rsi)/20 + abs(atrp-plan.atr_yuzde)/8 + abs(vol-float(x["VOL_RATIO"].iloc[-1]))/3
+        if macd_up == (float(x["MACD_HIST"].iloc[-1]) > float(x["MACD_HIST"].iloc[-2])):
+            sim -= 0.15
+        if sim <= 0.75:
+            giris=float(x["Close"].iloc[i]); gelecek=x["Close"].iloc[i+1:i+ufuk+1]
+            getiri=100*(float(gelecek.iloc[-1])/giris-1)
+            max_getiri=100*(float(x["High"].iloc[i+1:i+ufuk+1].max())/giris-1)
+            adaylar.append((sim,getiri,max_getiri))
+    if not adaylar:
+        return {}
+    adaylar=sorted(adaylar,key=lambda z:z[0])[:80]
+    getiriler=[a[1] for a in adaylar]; maks=[a[2] for a in adaylar]
+    return {
+        "örnek_sayısı": len(adaylar),
+        "başarı_oranı": round(100*sum(g>0 for g in getiriler)/len(getiriler),1),
+        "ortalama_getiri": round(float(np.mean(getiriler)),2),
+        "medyan_getiri": round(float(np.median(getiriler)),2),
+        "ortalama_maksimum": round(float(np.mean(maks)),2),
+        "ufuk": ufuk,
+    }
+
+
 def dinamik_trailing_stop(plan: TradePlan, pik_fiyat: float, guncel_fiyat: float) -> float:
     # Kâr büyüdükçe stop sıkılaşır; oynaklık yüksekse daha geniş kalır.
     kar_pct = 100 * (guncel_fiyat / max(plan.fiyat, 1e-9) - 1)
@@ -710,7 +791,7 @@ def alarmlari_kontrol_et() -> List[str]:
             alarm["tetik_fiyati"] = fiyat
             metin = f"🚨 {alarm['hisse']} alarmı tetiklendi: {fiyat:.2f} TL ({yon} {hedef:.2f} TL)"
             tetiklenenler.append(metin)
-            telegram_bildirim_gonder(metin)
+            bildirim_ekle("ALARM", f"{alarm['hisse']} alarmı", metin, f"alarm-{alarm['hisse']}-{hedef}-{yon}")
             degisti = True
     if degisti:
         veri_kaydet(ALARMLAR_DOSYASI, alarmlar)
@@ -720,6 +801,7 @@ def alarmlari_kontrol_et() -> List[str]:
 # =========================================================
 # ARAYÜZ
 # =========================================================
+aktif_havuz = bist_tum_semboller_getir()
 if "notified_stocks" not in st.session_state:
     st.session_state.notified_stocks = {}
 
@@ -728,7 +810,7 @@ pik_hafiza: Dict[str, float] = veri_yukle(PIK_DOSYASI, {})
 
 st.sidebar.header("💼 Portföyüm & Takip")
 with st.sidebar.expander("➕ Portföye Hisse Ekle"):
-    yeni_hisse = st.selectbox("Hisse seç", BIST_OTOMATIK_HAVUZ)
+    yeni_hisse = st.selectbox("Hisse seç", aktif_havuz)
     adet = st.number_input("Adet", min_value=1, step=1, value=100)
     maliyet = st.number_input("Maliyet (TL)", min_value=0.01, step=0.05, value=10.0)
     if st.button("Portföye kaydet", use_container_width=True):
@@ -769,10 +851,10 @@ if portfoy:
     st.sidebar.metric("Toplam değer", f"{tr_fiyat(toplam_deger)} TL")
     st.sidebar.metric("Net K/Z", f"{tr_fiyat(net)} TL", f"{100*net/toplam_maliyet:+.2f}%" if toplam_maliyet else "0%")
 
-st.title("🛡️ Canavar AI Trade Terminal v4.0")
+st.title("🛡️ Canavar AI Trade Terminal v5.0")
 col_sub1, col_sub2 = st.columns([0.82, 0.18])
 with col_sub1:
-    st.caption("Dip dönüşü • hedef fiyat • ATR tabanlı dinamik stop • alarm • backtest")
+    st.caption(f"Dip dönüşü • hedef fiyat • dinamik stop • geçmiş benzerlik analizi • {len(aktif_havuz)} BIST hissesi")
 with col_sub2:
     reset_key = datetime.now().strftime("%Y%m%d%H%M%S")
     components.html(
@@ -789,20 +871,34 @@ with col_sub2:
         height=32,
     )
 
-st.warning(
-    "Bu yazılım yatırım danışmanlığı değildir. Dip, hedef ve olasılık değerleri geçmiş fiyat/hacim verilerinden üretilen karar destek tahminleridir; kesin sonuç vermez."
-)
-
 for mesaj in alarmlari_kontrol_et():
     st.error(mesaj)
 
-t1, t2, t3, t4, t5 = st.tabs([
+t0, t1, t2, t3, t4, t5 = st.tabs([
+    "🏆 Günün Top 10'u",
     "🎯 Dipten Al / Pikten Sat",
-    "💼 Portföy Koruma",
+    "💼 Portföy Asistanı",
     "🧪 Backtest",
     "📖 Temel Analiz",
-    "🚨 Alarmlar",
+    "🔔 Bildirimler / Alarmlar",
 ])
+
+with t0:
+    st.header("🏆 Günün En Güçlü 10 Dip Dönüş Adayı")
+    top10 = st.session_state.get("top10_sonuclari", [])
+    if top10:
+        st.dataframe(pd.DataFrame(top10), use_container_width=True, hide_index=True)
+        st.caption("Liste son yapılan taramanın güven, dip puanı ve risk/kazanç sıralamasıdır.")
+    else:
+        st.info("Önce Dipten Al / Pikten Sat sekmesinden havuzu tarayın. Sonuçların ilk 10'u burada kalıcı olarak gösterilir.")
+    st.subheader("🔔 Son Bildirimler")
+    bildirimler = list(reversed(veri_yukle(BILDIRIM_DOSYASI, [])))[:15]
+    if bildirimler:
+        for b in bildirimler:
+            st.write(f"**{b.get('tarih','')} — {b.get('baslik','')}**")
+            st.caption(b.get('mesaj',''))
+    else:
+        st.info("Henüz bildirim oluşmadı.")
 
 with t1:
     st.header("🎯 BIST Dip Dönüşü Tarayıcısı")
@@ -828,9 +924,9 @@ with t1:
         puan_altinda = 0
         teyitsiz = 0
 
-        for i, h in enumerate(BIST_OTOMATIK_HAVUZ):
-            bar.progress((i + 1) / len(BIST_OTOMATIK_HAVUZ))
-            durum.caption(f"Taranıyor: {h} ({i + 1}/{len(BIST_OTOMATIK_HAVUZ)})")
+        for i, h in enumerate(aktif_havuz):
+            bar.progress((i + 1) / len(aktif_havuz))
+            durum.caption(f"Taranıyor: {h} ({i + 1}/{len(aktif_havuz)})")
             plan = islem_plani_hesapla(h)
             if plan is None:
                 veri_alinamayan.append(h)
@@ -842,10 +938,12 @@ with t1:
                 "Fiyat": f"{plan.fiyat:.2f}",
                 "Dip Puanı": plan.dip_puani,
                 "Güven": plan.sinyal_guveni,
+                "Başarı Olasılığı": f"%{model_olasiligi(plan)}",
                 "Aşama": plan.asama,
                 "Alım Bölgesi": f"{plan.alim_alt:.2f}–{plan.alim_ust:.2f}",
                 "Hedef 1": f"{plan.hedef_1:.2f} (%{plan.potansiyel_1:.1f})",
                 "Hedef 2": f"{plan.hedef_2:.2f} (%{plan.potansiyel_2:.1f})",
+                "Beklenen Süre": plan.tahmini_sure,
                 "Stop": f"{plan.stop:.2f} (-%{plan.risk_yuzde:.1f})",
                 "R/K": plan.risk_kazanc,
                 "RSI": plan.rsi,
@@ -874,6 +972,10 @@ with t1:
             esik_esnetildi = True
 
         st.session_state["tarama_sonuclari"] = uygun_sonuclar
+        st.session_state["top10_sonuclari"] = tum_adaylar[:10]
+        for aday in tum_adaylar[:10]:
+            if aday.get("Güven", 0) >= 75:
+                bildirim_ekle("SİNYAL", f"{aday['Hisse']} güçlü aday", f"{aday['Aşama']} | {aday['Alım Bölgesi']} | Hedef 1: {aday['Hedef 1']}", f"top-{aday['Hisse']}-{datetime.now().strftime('%Y-%m-%d')}")
         st.session_state["tarama_planlari"] = {k: asdict(v) for k, v in planlar.items()}
         st.session_state["tarama_ozeti"] = {
             "veri_alinan": len(tum_adaylar),
@@ -927,6 +1029,17 @@ with t1:
                 st.markdown("**Risk uyarıları**")
                 for u in p.uyarilar:
                     st.write(f"• {u}")
+            if st.button(f"{p.ticker} için geçmişteki benzer formasyonları incele", key=f"benzer_{p.ticker}"):
+                with st.spinner("Son 5 yıldaki benzer yapılar karşılaştırılıyor..."):
+                    benzer = benzer_formasyon_analizi(p.ticker, p)
+                if benzer:
+                    q1,q2,q3,q4 = st.columns(4)
+                    q1.metric("Benzer örnek", benzer["örnek_sayısı"])
+                    q2.metric("Pozitif kapanış oranı", f"%{benzer['başarı_oranı']}")
+                    q3.metric(f"{benzer['ufuk']} gün ortalama getiri", f"%{benzer['ortalama_getiri']}")
+                    q4.metric("Ortalama maksimum yükseliş", f"%{benzer['ortalama_maksimum']}")
+                else:
+                    st.warning("Yeterli sayıda benzer geçmiş formasyon bulunamadı.")
     else:
         st.info("Tarama butonuna basın. İlk tarama veri indirdiği için biraz ağır çalışabilir.")
 
@@ -954,9 +1067,7 @@ with t2:
                 sat_uyarilari.append(f"{h}: {fiyat:.2f} TL, dinamik stop {dinamik_stop:.2f} TL")
                 anahtar = f"{h}-{dinamik_stop:.2f}"
                 if not st.session_state.notified_stocks.get(anahtar):
-                    telegram_bildirim_gonder(
-                        f"🚨 {h} KÂR KORUMA UYARISI\nGüncel: {fiyat:.2f} TL\nPik: {pik:.2f} TL\nDinamik stop: {dinamik_stop:.2f} TL\nPikten düşüş: %{pikten_dusus:.2f}"
-                    )
+                    bildirim_ekle("SAT", f"{h} kâr koruma", f"Güncel {fiyat:.2f} TL, pik {pik:.2f} TL, dinamik stop {dinamik_stop:.2f} TL", anahtar)
                     st.session_state.notified_stocks[anahtar] = True
             elif hedef2_gecti:
                 sinyal = "🟣 HEDEF 2 GÖRÜLDÜ / STOP SIKILAŞTIR"
@@ -964,6 +1075,19 @@ with t2:
                 sinyal = "🟢 HEDEF 1 GÖRÜLDÜ / KISMİ KÂR"
             else:
                 sinyal = "🟡 POZİSYONU İZLE"
+            kar_pct = 100 * (fiyat / float(bilgi["maliyet"]) - 1)
+            if fiyat <= dinamik_stop:
+                asistan = "Satış/kâr koruma seviyesi tetiklendi"
+            elif hedef2_gecti:
+                asistan = "Hedef 2 görüldü; stopu sıkılaştır"
+            elif hedef1_gecti:
+                asistan = "İlk hedef görüldü; kısmi kâr düşünülebilir"
+            elif kar_pct >= 5:
+                asistan = "Kâr var; dinamik stopla taşınabilir"
+            elif kar_pct <= -plan.risk_yuzde:
+                asistan = "Zarar stop sınırına yaklaştı"
+            else:
+                asistan = "Pozisyonu izle"
             satirlar.append({
                 "Hisse": h,
                 "Güncel": f"{fiyat:.2f}",
@@ -973,6 +1097,7 @@ with t2:
                 "Hedef 1": f"{plan.hedef_1:.2f}",
                 "Hedef 2": f"{plan.hedef_2:.2f}",
                 "Dinamik Stop": f"{dinamik_stop:.2f}",
+                "Asistan Yorumu": asistan,
                 "Sinyal": sinyal,
             })
         veri_kaydet(PIK_DOSYASI, pik_hafiza)
@@ -991,7 +1116,7 @@ with t3:
     st.caption("Aynı gün hedef ve stop birlikte görülürse ihtiyatlı şekilde stop önce kabul edilir.")
     bc1, bc2, bc3 = st.columns(3)
     with bc1:
-        bt_hisse = st.selectbox("Backtest hissesi", BIST_OTOMATIK_HAVUZ, key="bt_hisse")
+        bt_hisse = st.selectbox("Backtest hissesi", aktif_havuz, key="bt_hisse")
     with bc2:
         bt_gun = st.selectbox("Test dönemi", [250, 500, 750], index=1)
     with bc3:
@@ -1011,7 +1136,7 @@ with t3:
 
 with t4:
     st.header("📖 Şirket Temel Analiz Defteri")
-    secilen_temel = st.selectbox("Şirket", BIST_OTOMATIK_HAVUZ, key="temel_hisse")
+    secilen_temel = st.selectbox("Şirket", aktif_havuz, key="temel_hisse")
     if st.button("Temel verileri çek"):
         inf = temel_veri_getir(secilen_temel)
         if not inf:
@@ -1031,11 +1156,21 @@ with t4:
             c8.metric("Temettü verimi", f"%{100*inf.get('dividendYield'):.2f}" if inf.get("dividendYield") else "Yok/N/A")
 
 with t5:
-    st.header("🚨 Akıllı Fiyat Alarmları")
+    st.header("🔔 Bildirim Merkezi ve Fiyat Alarmları")
+    bildirimler = list(reversed(veri_yukle(BILDIRIM_DOSYASI, [])))
+    if bildirimler:
+        st.dataframe(pd.DataFrame(bildirimler[:100]), use_container_width=True, hide_index=True)
+        if st.button("Bildirim geçmişini temizle"):
+            veri_kaydet(BILDIRIM_DOSYASI, [])
+            st.rerun()
+    else:
+        st.info("Henüz uygulama içi bildirim yok.")
+    st.markdown("---")
+    st.subheader("🚨 Akıllı Fiyat Alarmları")
     alarmlar = veri_yukle(ALARMLAR_DOSYASI, [])
     a1, a2, a3 = st.columns(3)
     with a1:
-        a_hisse = st.selectbox("Alarm hissesi", BIST_OTOMATIK_HAVUZ, key="alarm_h")
+        a_hisse = st.selectbox("Alarm hissesi", aktif_havuz, key="alarm_h")
     with a2:
         a_fiyat = st.number_input("Hedef fiyat (TL)", min_value=0.01, step=0.05, value=20.0)
     with a3:
@@ -1059,7 +1194,3 @@ with t5:
     else:
         st.info("Kurulu alarm yok")
 
-st.markdown("---")
-st.caption(
-    "Not: Hedefler garanti değildir. Gerçek işlem öncesinde komisyon, kayma, likidite, devre kesici ve veri gecikmesini ayrıca dikkate alın."
-)
