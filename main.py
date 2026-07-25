@@ -507,6 +507,8 @@ def karar_motoru(ticker: str, plan: TradePlan, piyasa: Dict[str, Any]) -> Dict[s
         "ogrenme_duzeltmesi": round(ogrenme, 1),
         "nedenler": nedenler[:7],
     }
+    sonuc["analist_yorumu"] = analist_degerlendirmesi(plan, sonuc, piyasa)
+    return sonuc
 
 def islem_ac(hisse: str, fiyat: float, adet: float, kaynak: str, karar_puani: int = 0) -> None:
     islemler = veri_yukle(ISLEM_DOSYASI, [])
