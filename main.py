@@ -18,12 +18,12 @@ from streamlit_autorefresh import st_autorefresh
 import yfinance as yf
 
 # =========================================================
-# TRADE ANALİZ v10.1
+# TRADE ANALİZ v10.3
 # Teknik fırsat analizi + hedef fiyat + dinamik stop + performans analizi
 # =========================================================
 
 st.set_page_config(
-    page_title="Trade Analiz v10.1",
+    page_title="Trade Analiz v10.3",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -1384,6 +1384,187 @@ def hedef_sonrasi_teknik_degerlendirme(
     }
 
 
+
+def hedef_oncesi_teknik_degerlendirme(
+    hisse: str, fiyat: float, maliyet: float, pik: float,
+    ilk_stop: float, hedef_1: float, atr: float
+) -> Dict[str, Any]:
+    """Hedef 1 görülmeden önce fiyat hedeften uzaklaşıyorsa teknik bozulmayı değerlendirir."""
+    varsayilan = {
+        "karar_kodu": "BEKLE",
+        "karar": "🟡 BEKLE / PLANI BOZMA",
+        "ozet": "Güncel teknik veriler sınırlı. Başlangıç stopu korunarak plansız işlemden kaçınılmalı.",
+        "gerekceler": ["Güncel teknik göstergelerin tamamı üretilemedi."],
+        "teknik_puan": 0,
+        "rsi": None,
+        "hacim_orani": None,
+        "macd_durumu": "Veri sınırlı",
+        "trend_durumu": "Veri sınırlı",
+        "geri_cekilme_yuzde": round(100 * (fiyat / max(pik, 1e-9) - 1), 2),
+        "hedef_ilerleme": round(100 * (fiyat - maliyet) / max(hedef_1 - maliyet, 1e-9), 1),
+        "onerilen_stop": round(float(ilk_stop), 2),
+    }
+
+    df = fiyat_verisi_getir(hisse, "1y")
+    if df.empty or len(df) < 60:
+        return varsayilan
+
+    x = gostergeleri_hesapla(df).dropna()
+    if len(x) < 6:
+        return varsayilan
+
+    son = x.iloc[-1]
+    onceki = x.iloc[-2]
+    close = float(son.get("Close", fiyat))
+    ema9 = float(son.get("EMA9", close))
+    sma20 = float(son.get("SMA20", close))
+    sma50 = float(son.get("SMA50", close))
+    rsi = float(son.get("RSI", 50))
+    vol_ratio = float(son.get("VOL_RATIO", 1.0))
+    macd_hist = float(son.get("MACD_HIST", 0.0))
+    onceki_macd = float(onceki.get("MACD_HIST", macd_hist))
+    roc5 = float(son.get("ROC5", 0.0))
+    son3 = x["Close"].tail(3)
+    son5 = x["Close"].tail(5)
+
+    geri_cekilme = 100 * (fiyat / max(pik, 1e-9) - 1)
+    hedef_ilerleme = 100 * (fiyat - maliyet) / max(hedef_1 - maliyet, 1e-9)
+    stop_mesafe = 100 * (fiyat / max(ilk_stop, 1e-9) - 1)
+
+    puan = 0
+    gerekceler: List[str] = []
+
+    if close > ema9 and close > sma20 and sma20 >= sma50:
+        puan += 3
+        trend_durumu = "Güçlü"
+        gerekceler.append("Fiyat EMA9 ve SMA20 üzerinde; kısa vadeli trend korunuyor.")
+    elif close > sma20:
+        puan += 1
+        trend_durumu = "Olumlu"
+        gerekceler.append("Fiyat 20 günlük ortalamanın üzerinde.")
+    elif close < ema9 and close < sma20:
+        puan -= 3
+        trend_durumu = "Zayıflıyor"
+        gerekceler.append("Fiyat EMA9 ve SMA20 altına indi.")
+    else:
+        puan -= 1
+        trend_durumu = "Kararsız"
+        gerekceler.append("Kısa vadeli trend net devam teyidi vermiyor.")
+
+    if macd_hist > 0 and macd_hist >= onceki_macd:
+        puan += 2
+        macd_durumu = "Pozitif ve güçleniyor"
+        gerekceler.append("MACD momentumu pozitif ve güçleniyor.")
+    elif macd_hist > 0:
+        puan += 1
+        macd_durumu = "Pozitif fakat yavaşlıyor"
+        gerekceler.append("MACD pozitif ancak ivme kaybediyor.")
+    elif macd_hist < onceki_macd:
+        puan -= 2
+        macd_durumu = "Negatif ve zayıflıyor"
+        gerekceler.append("MACD momentumu negatif ve zayıflıyor.")
+    else:
+        puan -= 1
+        macd_durumu = "Negatif"
+        gerekceler.append("MACD henüz olumlu devam sinyali vermiyor.")
+
+    if vol_ratio >= 1.20 and roc5 > 0:
+        puan += 2
+        gerekceler.append(f"Hacim ortalamanın {vol_ratio:.1f} katı ve 5 günlük momentum pozitif.")
+    elif vol_ratio < 0.75:
+        puan -= 1
+        gerekceler.append(f"Hacim zayıf ({vol_ratio:.1f}x); hareketin desteği sınırlı.")
+
+    dusen_3gun = len(son3) == 3 and all(float(son3.iloc[i]) < float(son3.iloc[i - 1]) for i in range(1, 3))
+    dusen_5gun_sayisi = 0
+    if len(son5) == 5:
+        dusen_5gun_sayisi = sum(float(son5.iloc[i]) < float(son5.iloc[i - 1]) for i in range(1, 5))
+    if dusen_3gun:
+        puan -= 2
+        gerekceler.append("Fiyat son 3 işlem gününde art arda geriledi.")
+    elif dusen_5gun_sayisi >= 3:
+        puan -= 1
+        gerekceler.append("Son 5 işlem gününün çoğunda satış baskısı görüldü.")
+
+    if geri_cekilme <= -6:
+        puan -= 3
+        gerekceler.append(f"Pozisyon zirvesinden %{abs(geri_cekilme):.1f} geri çekildi.")
+    elif geri_cekilme <= -3:
+        puan -= 2
+        gerekceler.append(f"Pozisyon zirvesinden %{abs(geri_cekilme):.1f} geri çekildi.")
+    elif geri_cekilme <= -1.5:
+        puan -= 1
+        gerekceler.append(f"Pozisyon zirvesinden %{abs(geri_cekilme):.1f} uzaklaştı.")
+    elif fiyat >= pik * 0.995:
+        puan += 1
+        gerekceler.append("Fiyat portföy içi zirveye yakın; yükseliş yapısı korunuyor.")
+
+    if hedef_ilerleme >= 60 and geri_cekilme <= -3:
+        puan -= 1
+        gerekceler.append("Hedefe önemli ölçüde yaklaşıldıktan sonra geri çekilme oluştu.")
+
+    if rsi < 40:
+        puan -= 2
+        gerekceler.append(f"RSI {rsi:.1f}; momentum belirgin şekilde zayıf.")
+    elif rsi < 47:
+        puan -= 1
+        gerekceler.append(f"RSI {rsi:.1f}; momentum zayıflıyor.")
+    elif 50 <= rsi <= 68:
+        puan += 1
+        gerekceler.append(f"RSI {rsi:.1f}; dengeli pozitif bölgede.")
+
+    if stop_mesafe <= 1.5:
+        puan -= 3
+        gerekceler.append(f"Fiyat başlangıç stopuna yalnızca %{max(0.0, stop_mesafe):.1f} uzaklıkta.")
+    elif stop_mesafe <= 3:
+        puan -= 1
+        gerekceler.append(f"Başlangıç stopuna mesafe daraldı (%{stop_mesafe:.1f}).")
+
+    if fiyat <= ilk_stop:
+        karar_kodu = "SAT"
+        karar = "🔴 POZİSYONU KAPATMAYI DEĞERLENDİR"
+        ozet = "Başlangıç stopu ihlal edildi. Zararı büyütmeden çıkış planı önceliklidir."
+        onerilen_stop = ilk_stop
+    elif puan <= -7:
+        karar_kodu = "SAT"
+        karar = "🔴 POZİSYONU KAPATMAYI DEĞERLENDİR"
+        ozet = "Hedef 1 görülmeden teknik yapı belirgin biçimde bozuldu. Riski büyütmeden çıkış değerlendirilmelidir."
+        onerilen_stop = max(ilk_stop, pik - 0.90 * atr)
+    elif puan <= -3:
+        karar_kodu = "RISK_AZALT"
+        karar = "🟠 RİSKİ AZALT / STOPU SIKILAŞTIR"
+        ozet = "Fiyat hedeften uzaklaşıyor ve teknik zayıflama işaretleri artıyor. Yeni alım yapmadan stop sıkılaştırılmalı; pozisyon küçültme değerlendirilebilir."
+        onerilen_stop = max(ilk_stop, maliyet * 0.985, pik - 1.20 * atr)
+    elif puan <= 0:
+        karar_kodu = "DIKKAT"
+        karar = "🟡 DİKKATLİ BEKLE / STOPU YAKINDAN İZLE"
+        ozet = "Hedef yönündeki ivme zayıfladı ancak plan tamamen bozulmuş değil. Stop korunarak teyit beklenmeli."
+        onerilen_stop = max(ilk_stop, pik - 1.60 * atr)
+    else:
+        karar_kodu = "KORU"
+        karar = "🔵 POZİSYONU KORU"
+        ozet = "Hedef 1 henüz görülmedi fakat teknik yapı korunuyor. Mevcut plan ve stop ile takip sürdürülebilir."
+        onerilen_stop = max(ilk_stop, pik - 2.00 * atr)
+
+    onerilen_stop = min(float(onerilen_stop), fiyat * 0.999)
+
+    return {
+        "karar_kodu": karar_kodu,
+        "karar": karar,
+        "ozet": ozet,
+        "gerekceler": gerekceler[:8],
+        "teknik_puan": int(puan),
+        "rsi": round(rsi, 1),
+        "hacim_orani": round(vol_ratio, 2),
+        "macd_durumu": macd_durumu,
+        "trend_durumu": trend_durumu,
+        "geri_cekilme_yuzde": round(geri_cekilme, 2),
+        "hedef_ilerleme": round(hedef_ilerleme, 1),
+        "onerilen_stop": round(onerilen_stop, 2),
+    }
+
+
+
 def pozisyon_aksiyon_karti(asama: str, hedef_degerlendirme: Dict[str, Any]) -> Dict[str, str]:
     """Pozisyon aşamasını kullanıcının tek bakışta anlayacağı net bir aksiyona çevirir."""
     karar_kodu = str(hedef_degerlendirme.get("karar_kodu", ""))
@@ -1391,8 +1572,14 @@ def pozisyon_aksiyon_karti(asama: str, hedef_degerlendirme: Dict[str, Any]) -> D
         return {"kod": "KORU", "baslik": "🟢 AKSİYON: POZİSYONU KORU", "renk": "success"}
     if karar_kodu == "KISMI_KAR":
         return {"kod": "YARI_SAT", "baslik": "🟡 AKSİYON: %50 KÂR AL / KALANI TAŞI", "renk": "warning"}
-    if karar_kodu == "TAMAMINI_KAPAT":
-        return {"kod": "SAT", "baslik": "🔴 AKSİYON: TAMAMINI SATMAYI DEĞERLENDİR", "renk": "error"}
+    if karar_kodu in {"TAMAMINI_KAPAT", "SAT"}:
+        return {"kod": "SAT", "baslik": "🔴 AKSİYON: POZİSYONU KAPATMAYI DEĞERLENDİR", "renk": "error"}
+    if karar_kodu == "RISK_AZALT":
+        return {"kod": "RISK_AZALT", "baslik": "🟠 AKSİYON: RİSKİ AZALT / STOPU SIKILAŞTIR", "renk": "warning"}
+    if karar_kodu == "DIKKAT":
+        return {"kod": "DIKKAT", "baslik": "🟡 AKSİYON: DİKKATLİ BEKLE / STOPU İZLE", "renk": "warning"}
+    if karar_kodu == "KORU":
+        return {"kod": "KORU", "baslik": "🔵 AKSİYON: POZİSYONU KORU", "renk": "info"}
     if "İKİNCİ HEDEF" in asama:
         return {"kod": "KAR_KORU", "baslik": "🟣 AKSİYON: KÂRIN BÜYÜK BÖLÜMÜNÜ KORU", "renk": "warning"}
     if "KÂR KORUMA" in asama or "ZARAR KES" in asama:
@@ -1412,20 +1599,23 @@ def pozisyon_durumu_hesapla(
     hisse: str, fiyat: float, maliyet: float, pik: float, ilk_stop: float,
     hedef_1: float, hedef_2: float, atr: float
 ) -> Dict[str, Any]:
-    """Pozisyon aşamasını belirler; Hedef 1 sonrasında teknik verilere göre özel satış/taşıma kararı üretir."""
+    """Pozisyonu her yenilemede değerlendirir; hedefe yaklaşma ve hedeften uzaklaşma durumlarında net aksiyon üretir."""
     kar_pct = 100 * (fiyat / max(maliyet, 1e-9) - 1)
     h1_ilerleme = 100 * (fiyat - maliyet) / max(hedef_1 - maliyet, 1e-9)
     hedef_degerlendirme: Dict[str, Any] = {}
+    oncesi_degerlendirme: Dict[str, Any] = {}
 
     if pik >= hedef_2:
         dinamik_stop = max(ilk_stop, maliyet, pik - 1.15 * atr)
     elif pik >= hedef_1:
         hedef_degerlendirme = hedef_sonrasi_teknik_degerlendirme(hisse, fiyat, maliyet, pik, atr)
         dinamik_stop = max(ilk_stop, float(hedef_degerlendirme["onerilen_stop"]))
-    elif kar_pct >= 4:
-        dinamik_stop = max(ilk_stop, maliyet * 0.995, pik - 1.85 * atr)
     else:
-        dinamik_stop = max(ilk_stop, pik - 2.20 * atr)
+        oncesi_degerlendirme = hedef_oncesi_teknik_degerlendirme(
+            hisse=hisse, fiyat=fiyat, maliyet=maliyet, pik=pik,
+            ilk_stop=ilk_stop, hedef_1=hedef_1, atr=atr
+        )
+        dinamik_stop = max(ilk_stop, float(oncesi_degerlendirme.get("onerilen_stop", ilk_stop)))
 
     dinamik_stop = round(min(dinamik_stop, fiyat * 0.999) if fiyat > dinamik_stop else dinamik_stop, 2)
 
@@ -1453,28 +1643,40 @@ def pozisyon_durumu_hesapla(
             asama = "🎯 İLK HEDEF — KISMİ KÂR"
             oncelik = 4
         eylem = f"{hedef_degerlendirme.get('karar', '')}: {hedef_degerlendirme.get('ozet', '')} Yeni izlenen stop {dinamik_stop:.2f} TL."
-    elif h1_ilerleme >= 70:
-        asama = "🟢 İLK HEDEFE YAKIN"
-        eylem = "İlk hedefe yaklaşılmış durumda. Yeni alım yerine mevcut pozisyonu ve dinamik stopu yönet."
-        oncelik = 2
-    elif kar_pct >= 2:
-        asama = "🔵 POZİTİF İLERLEME"
-        eylem = "Pozisyon kârda ve plan içinde. Stop seviyesini takip ederek taşınabilir."
-        oncelik = 1
-    elif kar_pct > -2:
-        asama = "🟡 ALIM / BEKLEME BÖLGESİ"
-        eylem = "Fiyat maliyet çevresinde. İlk plan bozulmadıkça sabırlı takip; plansız ek alımdan kaçın."
-        oncelik = 1
     else:
-        asama = "🟠 STOPA YAKLAŞIYOR"
-        eylem = "Pozisyon zararda. Başlangıç stopuna kalan mesafeyi izle ve riski büyütme."
-        oncelik = 2
+        karar_kodu = str(oncesi_degerlendirme.get("karar_kodu", "BEKLE"))
+        eylem = f"{oncesi_degerlendirme.get('karar', '')}: {oncesi_degerlendirme.get('ozet', '')} İzlenen stop {dinamik_stop:.2f} TL."
+        if karar_kodu == "SAT":
+            asama = "🔴 HEDEFTEN UZAKLAŞTI — ÇIKIŞ DEĞERLENDİR"
+            oncelik = 5
+        elif karar_kodu == "RISK_AZALT":
+            asama = "🟠 HEDEFTEN UZAKLAŞIYOR — RİSKİ AZALT"
+            oncelik = 4
+        elif karar_kodu == "DIKKAT":
+            asama = "🟡 İVME ZAYIFLIYOR — DİKKATLİ BEKLE"
+            oncelik = 3
+        elif h1_ilerleme >= 70:
+            asama = "🟢 İLK HEDEFE YAKIN"
+            oncelik = 2
+        elif kar_pct >= 2:
+            asama = "🔵 POZİTİF İLERLEME"
+            oncelik = 1
+        elif kar_pct > -2:
+            asama = "🟡 ALIM / BEKLEME BÖLGESİ"
+            oncelik = 1
+        else:
+            asama = "🟠 STOPA YAKLAŞIYOR"
+            oncelik = 2
 
-    aksiyon = pozisyon_aksiyon_karti(asama, hedef_degerlendirme)
+    aktif_degerlendirme = hedef_degerlendirme or oncesi_degerlendirme
+    aksiyon = pozisyon_aksiyon_karti(asama, aktif_degerlendirme)
     return {
         "asama": asama, "eylem": eylem, "dinamik_stop": dinamik_stop,
         "kar_yuzde": round(kar_pct, 2), "hedef1_ilerleme": round(max(0, min(100, h1_ilerleme)), 1),
-        "oncelik": oncelik, "hedef_degerlendirme": hedef_degerlendirme,
+        "oncelik": oncelik,
+        "hedef_degerlendirme": hedef_degerlendirme,
+        "oncesi_degerlendirme": oncesi_degerlendirme,
+        "aktif_degerlendirme": aktif_degerlendirme,
         "aksiyon_kodu": aksiyon["kod"], "aksiyon_baslik": aksiyon["baslik"], "aksiyon_renk": aksiyon["renk"],
     }
 
@@ -1936,6 +2138,8 @@ with t2:
                 "Aksiyon": takip.get("aksiyon_baslik", "⚪ AKSİYON: İZLE").replace("AKSİYON: ", ""),
                 "Yönetim önerisi": takip["eylem"],
                 "_hedef_degerlendirme": takip.get("hedef_degerlendirme", {}),
+                "_oncesi_degerlendirme": takip.get("oncesi_degerlendirme", {}),
+                "_aktif_degerlendirme": takip.get("aktif_degerlendirme", {}),
                 "_aksiyon_baslik": takip.get("aksiyon_baslik", "⚪ AKSİYON: İZLE"),
                 "_aksiyon_renk": takip.get("aksiyon_renk", "info"),
             })
@@ -1961,6 +2165,8 @@ with t2:
             c4.metric("İzlenen stop", detay["İzlenen stop"])
             st.markdown("#### 🧭 Portföy Koçu — Net Aksiyon")
             hedef_detay = detay.get("_hedef_degerlendirme", {})
+            oncesi_detay = detay.get("_oncesi_degerlendirme", {})
+            aktif_detay = detay.get("_aktif_degerlendirme", {}) or hedef_detay or oncesi_detay
             aksiyon_baslik = detay.get("_aksiyon_baslik", "⚪ AKSİYON: İZLE")
             aksiyon_renk = detay.get("_aksiyon_renk", "info")
             if aksiyon_renk == "success":
@@ -1973,23 +2179,29 @@ with t2:
                 st.info(f"### {aksiyon_baslik}")
 
             st.write(detay["Yönetim önerisi"])
-            if hedef_detay:
+            if aktif_detay:
                 st.markdown(
-                    f"**Teknik puan:** {hedef_detay.get('teknik_puan', 0):+d}  |  "
-                    f"**Trend:** {hedef_detay.get('trend_durumu', '-')}  |  "
-                    f"**MACD:** {hedef_detay.get('macd_durumu', '-')}  |  "
-                    f"**RSI:** {hedef_detay.get('rsi', '-')}  |  "
-                    f"**Hacim:** {hedef_detay.get('hacim_orani', '-')}x"
+                    f"**Teknik puan:** {int(aktif_detay.get('teknik_puan', 0)):+d}  |  "
+                    f"**Trend:** {aktif_detay.get('trend_durumu', '-')}  |  "
+                    f"**MACD:** {aktif_detay.get('macd_durumu', '-')}  |  "
+                    f"**RSI:** {aktif_detay.get('rsi', '-')}  |  "
+                    f"**Hacim:** {aktif_detay.get('hacim_orani', '-')}x"
                 )
+                if oncesi_detay and not hedef_detay:
+                    st.markdown(
+                        f"**Zirveden geri çekilme:** %{abs(float(aktif_detay.get('geri_cekilme_yuzde', 0))):.2f}  |  "
+                        f"**Hedef 1 ilerleme:** %{float(aktif_detay.get('hedef_ilerleme', 0)):.1f}"
+                    )
                 st.markdown("**Kararın gerekçeleri:**")
-                for gerekce in hedef_detay.get("gerekceler", []):
+                for gerekce in aktif_detay.get("gerekceler", []):
                     st.markdown(f"- {gerekce}")
                 st.info(f"Yeni izlenen stop: **{detay['İzlenen stop']}**")
-                st.caption("Hedef 1 görüldükten sonra karar her otomatik yenilemede trend, hacim, MACD, RSI ve direnç verileriyle yeniden hesaplanır.")
+                if hedef_detay:
+                    st.caption("Hedef 1 görüldükten sonra karar her otomatik yenilemede trend, hacim, MACD, RSI ve direnç verileriyle yeniden hesaplanır.")
+                else:
+                    st.caption("Hedef 1 görülmeden önce de fiyatın zirveden geri çekilmesi, hedefe ilerleme kaybı, trend, MACD, RSI, hacim ve stop mesafesi her yenilemede yeniden değerlendirilir.")
             elif "STOP" in detay["Aşama"] or "ZARAR" in detay["Aşama"]:
                 st.error("Risk sınırı devreye girdi. Zararı büyütmeden çıkış planını uygulamak önceliklidir.")
-            else:
-                st.caption("Hedef 1 gerçekleşene kadar aksiyon; maliyet, hedef ilerlemesi ve izlenen stopa göre güncellenir. Hedef 1 sonrasında teknik karar motoru devreye girer.")
             st.progress(int(float(detay["Hedef 1 ilerleme"].replace("%", ""))) / 100)
             st.caption(f"İlk hedefe ilerleme: {detay['Hedef 1 ilerleme']} | Alış tarihi: {detay['Alış tarihi']}")
 
