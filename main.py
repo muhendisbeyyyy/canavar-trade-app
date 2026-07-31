@@ -18,12 +18,12 @@ from streamlit_autorefresh import st_autorefresh
 import yfinance as yf
 
 # =========================================================
-# TRADE ANALİZ v12.1
+# TRADE ANALİZ v12.2
 # Teknik fırsat analizi + hedef fiyat + dinamik stop + performans analizi
 # =========================================================
 
 st.set_page_config(
-    page_title="Trade Analiz v12.1",
+    page_title="Trade Analiz v12.2",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -57,6 +57,7 @@ BILDIRIM_DOSYASI = DATA_DIR / "bildirim_merkezi.json"
 ISLEM_DOSYASI = DATA_DIR / "islem_gunlugu.json"
 MODEL_DOSYASI = DATA_DIR / "model_ayarlari.json"
 TARAMA_DOSYASI = DATA_DIR / "son_tarama.json"
+TEYIT_TAKIP_DOSYASI = DATA_DIR / "teyit_takip.json"
 
 # Tokenı doğrudan koda yazmayın.
 # Windows PowerShell örneği:
@@ -1401,6 +1402,54 @@ def alarmlari_kontrol_et() -> List[str]:
 # -------------------------
 # Portföy planı ve pozisyon takip yardımcıları
 # -------------------------
+def teyit_takibe_ekle(hisse: str, satir: Dict[str, Any]) -> bool:
+    """Tarama adayını gerçek alış yapılmadan kapanış teyidi takibine ekler."""
+    takip = veri_yukle(TEYIT_TAKIP_DOSYASI, {})
+    hisse = str(hisse).upper().strip()
+    if not hisse:
+        return False
+    onceki = takip.get(hisse, {})
+    takip[hisse] = {
+        "hisse": hisse,
+        "eklenme_tarihi": onceki.get("eklenme_tarihi", datetime.now().strftime("%Y-%m-%d %H:%M")),
+        "ilk_fiyat": float(str(satir.get("Fiyat", 0)).replace(",", ".") or 0),
+        "ilk_karar": str(satir.get("Karar", "-")),
+        "ilk_birlesik": int(satir.get("Birleşik Puan", 0) or 0),
+        "ilk_kalite": int(satir.get("Kalite Skoru", 0) or 0),
+        "ilk_giris": int(satir.get("Giriş Skoru", 0) or 0),
+        "ilk_asama": str(satir.get("Aşama", "-")),
+        "son_durum": onceki.get("son_durum", "🟡 TEYİT BEKLENİYOR"),
+        "son_kontrol": onceki.get("son_kontrol", "-"),
+    }
+    veri_kaydet(TEYIT_TAKIP_DOSYASI, takip)
+    return True
+
+
+def teyit_takip_anlik_degerlendir(hisse: str, piyasa: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    plan = islem_plani_hesapla(hisse)
+    if plan is None:
+        return None
+    karar = karar_motoru(hisse, plan, piyasa)
+    kalite = int(karar.get("kalite_skoru", 0))
+    giris = int(karar.get("giris_skoru", 0))
+    risk_puani = int(karar.get("risk_profili", {}).get("skor", 100))
+    teyit = int(karar.get("yapisal_teyit", {}).get("teyit_sayisi", 0))
+    fiyat_bolgede = plan.alim_alt <= plan.fiyat <= plan.alim_ust
+    asama = str(plan.asama)
+    engeller = karar.get("engeller", []) or []
+    if kalite >= 68 and giris >= 55 and teyit >= 4 and risk_puani <= 55 and plan.risk_kazanc >= 1.40 and fiyat_bolgede and not engeller:
+        durum, aksiyon, renk = "🟢 ALIM TEYİDİ GELDİ", "Kapanış ve fiyat bölgesi teyidi oluştu. Güncel kademeler kontrol edilerek kontrollü giriş değerlendirilebilir.", "success"
+    elif kalite >= 62 and giris >= 48 and teyit >= 3 and risk_puani <= 65 and plan.risk_kazanc >= 1.35 and not engeller:
+        durum, aksiyon, renk = "🟢 KONTROLLÜ ALIM ADAYI", "Dönüş güçleniyor. Fiyat alım bölgesindeyse küçük ve kademeli pozisyon değerlendirilebilir.", "success"
+    elif "KAPANIŞ TEYİDİ" in asama or "DÖNÜŞ GELİŞİYOR" in asama:
+        durum, aksiyon, renk = "🟡 KAPANIŞ TEYİDİ BEKLE", "Adaylık devam ediyor ancak giriş teyidi tamamlanmadı.", "warning"
+    elif "KOŞULLAR YETERSİZ" in asama or kalite < 45 or giris < 30:
+        durum, aksiyon, renk = "🔴 ADAYLIK ZAYIFLADI", "Teknik yapı belirgin zayıfladı. Takipten çıkarılması değerlendirilebilir.", "error"
+    else:
+        durum, aksiyon, renk = "🟠 SADECE İZLE", "Henüz alım teyidi yok. Teknik puanların iyileşmesi beklenmeli.", "info"
+    return {"hisse": hisse, "plan": plan, "karar": karar, "durum": durum, "aksiyon": aksiyon, "renk": renk, "fiyat_bolgede": fiyat_bolgede, "kalite": kalite, "giris": giris, "teyit": teyit, "risk_puani": risk_puani}
+
+
 def portfoy_plan_anlik_goruntu(hisse: str, maliyet: float) -> Dict[str, Any]:
     """Hisse portföye eklenirken o andaki işlem planını sabit bir kayıt olarak saklar."""
     plan = islem_plani_hesapla(hisse)
@@ -1877,6 +1926,7 @@ if "notified_stocks" not in st.session_state:
     st.session_state.notified_stocks = {}
 
 portfoy: Dict[str, Dict[str, float]] = veri_yukle(PORTFOY_DOSYASI, {})
+teyit_takip: Dict[str, Dict[str, Any]] = veri_yukle(TEYIT_TAKIP_DOSYASI, {})
 pik_hafiza: Dict[str, float] = veri_yukle(PIK_DOSYASI, {})
 
 st.sidebar.header("💼 Portföyüm & Takip")
@@ -1924,7 +1974,7 @@ if portfoy:
     st.sidebar.metric("Toplam değer", f"{tr_fiyat(toplam_deger)} TL")
     st.sidebar.metric("Net K/Z", f"{tr_fiyat(net)} TL", f"{100*net/toplam_maliyet:+.2f}%" if toplam_maliyet else "0%")
 
-st.title("📊 Trade Analiz v12.0")
+st.title("📊 Trade Analiz v12.2")
 col_sub1, col_sub2 = st.columns([0.82, 0.18])
 with col_sub1:
     st.caption(f"Yapısal dönüş teyidi • kapanmış mum analizi • likidite filtresi • hedef ve stop • portföy koçu • tarihsel doğrulama • hızlı tarama • {len(aktif_havuz)} BIST hissesi")
@@ -1950,9 +2000,10 @@ with col_sub2:
 for mesaj in alarmlari_kontrol_et():
     st.error(mesaj)
 
-t0, t1, t2, t3, t4, t5, t6 = st.tabs([
+t0, t1, t2, t3, t4, t5, t6, t7 = st.tabs([
     "🎯 Öne Çıkan Fırsatlar",
     "🔎 Piyasa Tarama",
+    "👀 Teyit Takip Havuzu",
     "💼 Portföy Yönetimi",
     "📈 Performans Analizi",
     "🏢 Şirket Analizi",
@@ -2274,6 +2325,21 @@ with t1:
                 with st.expander("Verisi alınamayan hisseleri göster"):
                     st.write(", ".join(tarama_ozeti["veri_alinamayan"]))
         st.dataframe(pd.DataFrame(sonuclar), use_container_width=True, hide_index=True)
+        st.markdown("### 👀 Kapanış teyidi adaylarını takibe al")
+        takip_secimleri = st.multiselect(
+            "Takip havuzuna eklenecek hisseler",
+            options=[x["Hisse"] for x in sonuclar],
+            default=[x["Hisse"] for x in sonuclar if "KAPANIŞ TEYİDİ" in str(x.get("Karar", ""))][:3],
+            help="Bunlar gerçek portföye eklenmez; ayrı havuzda canlı izlenir.",
+            key="tarama_takip_secimleri",
+        )
+        if st.button("👀 Seçilenleri Teyit Takip Havuzuna Ekle", use_container_width=True, disabled=not takip_secimleri):
+            for h_takip in takip_secimleri:
+                satir_takip = next((x for x in sonuclar if x["Hisse"] == h_takip), None)
+                if satir_takip:
+                    teyit_takibe_ekle(h_takip, satir_takip)
+            st.success(f"{len(takip_secimleri)} hisse takip havuzuna eklendi.")
+            st.rerun()
         secili = st.selectbox("Detayını göster", [s["Hisse"] for s in sonuclar])
         plan_dict = st.session_state.get("tarama_planlari", {}).get(secili)
         if plan_dict:
@@ -2323,6 +2389,54 @@ with t1:
         st.info("Tarama kapsamını seçip butona basın. Günlük kullanım için Hızlı mod önerilir.")
 
 with t2:
+    st.header("👀 Kapanış Teyidi Takip Havuzu")
+    st.caption("Tarama ekranından seçilen adaylar, gerçek alış yapılmadan canlı biçimde tekrar analiz edilir.")
+    teyit_takip = veri_yukle(TEYIT_TAKIP_DOSYASI, {})
+    if not teyit_takip:
+        st.info("Takip havuzu boş. Piyasa Tarama sekmesinden hisse seçin.")
+    else:
+        piyasa_takip = piyasa_rejimi_hesapla()
+        takip_satirlari, takip_detaylari = [], {}
+        for h, kayit in list(teyit_takip.items()):
+            sonuc = teyit_takip_anlik_degerlendir(h, piyasa_takip)
+            if sonuc is None:
+                takip_satirlari.append({"Hisse": h, "Durum": "⚪ VERİ ALINAMADI"})
+                continue
+            plan, karar = sonuc["plan"], sonuc["karar"]
+            onceki = str(kayit.get("son_durum", ""))
+            kayit.update({"son_durum": sonuc["durum"], "son_kontrol": datetime.now().strftime("%Y-%m-%d %H:%M"), "son_fiyat": float(plan.fiyat), "son_kalite": sonuc["kalite"], "son_giris": sonuc["giris"], "son_teyit": sonuc["teyit"]})
+            teyit_takip[h] = kayit
+            if sonuc["durum"].startswith("🟢") and not onceki.startswith("🟢"):
+                mesaj = f"{h}: {sonuc['durum']} | {plan.fiyat:.2f} TL | Kalite/Giriş {sonuc['kalite']}/{sonuc['giris']}"
+                bildirim_ekle("TEYİT", f"{h} alım teyidi", mesaj, f"teyit-{h}-{datetime.now().strftime('%Y-%m-%d')}")
+                telegram_bildirim_gonder(mesaj)
+            ilk = float(kayit.get("ilk_fiyat", plan.fiyat) or plan.fiyat)
+            degisim = 100 * (plan.fiyat / ilk - 1) if ilk else 0
+            takip_satirlari.append({"Hisse": h, "Durum": sonuc["durum"], "Güncel": f"{plan.fiyat:.2f} TL", "Takibe Alındı": f"{ilk:.2f} TL", "Değişim": f"%{degisim:+.2f}", "Kalite": sonuc["kalite"], "Giriş": sonuc["giris"], "Teyit": f"{sonuc['teyit']}/7", "Risk": karar.get("risk_profili", {}).get("gosterim", "-"), "Alım Bölgesi": f"{plan.alim_alt:.2f}–{plan.alim_ust:.2f}", "Bölgede": "EVET" if sonuc["fiyat_bolgede"] else "HAYIR", "Hedef 1": f"{plan.hedef_1:.2f}", "Stop": f"{plan.stop:.2f}"})
+            takip_detaylari[h] = sonuc
+        veri_kaydet(TEYIT_TAKIP_DOSYASI, teyit_takip)
+        st.dataframe(pd.DataFrame(takip_satirlari), use_container_width=True, hide_index=True)
+        sec_takip = st.selectbox("Takip ayrıntısı", [x["Hisse"] for x in takip_satirlari], key="teyit_takip_detay")
+        det = takip_detaylari.get(sec_takip)
+        if det:
+            plan, karar = det["plan"], det["karar"]
+            if det["renk"] == "success": st.success(f"### {det['durum']}")
+            elif det["renk"] == "warning": st.warning(f"### {det['durum']}")
+            elif det["renk"] == "error": st.error(f"### {det['durum']}")
+            else: st.info(f"### {det['durum']}")
+            st.write(det["aksiyon"])
+            a,b,c,d,e = st.columns(5)
+            a.metric("Güncel", f"{plan.fiyat:.2f} TL"); b.metric("Kalite", f"{det['kalite']}/100"); c.metric("Giriş", f"{det['giris']}/100"); d.metric("Teyit", f"{det['teyit']}/7"); e.metric("R/K", f"1:{plan.risk_kazanc:.2f}")
+            st.info(f"Alım bölgesi **{plan.alim_alt:.2f}–{plan.alim_ust:.2f} TL** | Hedef 1 **{plan.hedef_1:.2f} TL** | Stop **{plan.stop:.2f} TL**")
+            if karar.get("nedenler"):
+                for gerekce in karar["nedenler"]: st.markdown(f"- {gerekce}")
+            if st.button(f"{sec_takip} hissesini takipten çıkar", use_container_width=True):
+                teyit_takip.pop(sec_takip, None); veri_kaydet(TEYIT_TAKIP_DOSYASI, teyit_takip); st.rerun()
+        if st.button("Tüm takip havuzunu temizle"):
+            veri_kaydet(TEYIT_TAKIP_DOSYASI, {}); st.rerun()
+
+
+with t3:
     st.header("💼 Portföy Pozisyon Takibi")
     st.caption("Hisse portföye eklendiği andaki hedef ve stop planı sabitlenir. Sistem daha sonra fiyatı bu plana göre izler ve kâr koruma seviyesini dinamik olarak yükseltir.")
     if not portfoy:
@@ -2465,7 +2579,7 @@ with t2:
                 st.success(f"{h} için hedef ve stop planı yeniden oluşturuldu.")
                 st.rerun()
 
-with t3:
+with t4:
     st.header("📈 Performans ve Model Doğrulama")
     st.caption("Aynı gün hedef ve stop birlikte görülürse ihtiyatlı şekilde stop önce kabul edilir.")
     bc1, bc2, bc3 = st.columns(3)
@@ -2521,7 +2635,7 @@ with t3:
                 ).reset_index()
                 st.dataframe(grup, use_container_width=True, hide_index=True)
 
-with t4:
+with t5:
     st.header("📖 Şirket Temel Analiz Defteri")
     secilen_temel = st.selectbox("Şirket", aktif_havuz, key="temel_hisse")
     if st.button("Temel verileri çek"):
@@ -2542,7 +2656,7 @@ with t4:
             c7.metric("Kâr büyümesi", f"%{100*inf.get('earningsGrowth'):.1f}" if inf.get("earningsGrowth") else "N/A")
             c8.metric("Temettü verimi", f"%{100*inf.get('dividendYield'):.2f}" if inf.get("dividendYield") else "Yok/N/A")
 
-with t5:
+with t6:
     st.header("🔔 Bildirim Merkezi ve Fiyat Alarmları")
     bildirimler = list(reversed(veri_yukle(BILDIRIM_DOSYASI, [])))
     if bildirimler:
@@ -2583,7 +2697,7 @@ with t5:
 
 
 
-with t6:
+with t7:
     st.header("🧠 İşlem Günlüğü ve Öğrenme Merkezi")
     st.caption("Karar motoru yalnızca kapanmış gerçek işlemlerden küçük bir puan ayarı yapar; az veriyle aşırı öğrenme engellenir.")
     islemler = veri_yukle(ISLEM_DOSYASI, [])
