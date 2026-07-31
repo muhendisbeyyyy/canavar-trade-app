@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 import json
 import math
@@ -18,12 +18,12 @@ from streamlit_autorefresh import st_autorefresh
 import yfinance as yf
 
 # =========================================================
-# TRADE ANALİZ v12.2
+# TRADE ANALİZ v12.3
 # Teknik fırsat analizi + hedef fiyat + dinamik stop + performans analizi
 # =========================================================
 
 st.set_page_config(
-    page_title="Trade Analiz v12.2",
+    page_title="Trade Analiz v12.3",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -714,11 +714,50 @@ def haberler_getir(ticker_name: str) -> List[Dict[str, Any]]:
         return []
 
 
+@st.cache_data(ttl=25, show_spinner=False)
 def guncel_fiyat_bul(ticker_name: str) -> Optional[float]:
+    """Mümkünse seans içi son fiyatı, aksi halde son günlük kapanışı döndürür.
+
+    Teyit takip havuzu ve canlı portföy aynı fonksiyonu kullandığı için iki ekrandaki
+    fiyatlar aynı yenileme döngüsünde tutarlı kalır.
+    """
+    sembol = f"{ticker_name}.IS"
+    for interval, period in (("1m", "1d"), ("5m", "5d")):
+        try:
+            df = yf.download(
+                sembol, period=period, interval=interval, auto_adjust=True,
+                progress=False, threads=False, timeout=12,
+            )
+            if not df.empty:
+                close = df["Close"]
+                if isinstance(close, pd.DataFrame):
+                    close = close.iloc[:, 0]
+                close = pd.to_numeric(close, errors="coerce").dropna()
+                if not close.empty:
+                    return round(float(close.iloc[-1]), 2)
+        except Exception:
+            pass
     df = fiyat_verisi_getir(ticker_name, "1mo")
     if df.empty:
         return None
     return round(float(df["Close"].iloc[-1]), 2)
+
+
+def plan_canli_fiyatla_guncelle(plan: TradePlan, canli_fiyat: Optional[float]) -> TradePlan:
+    """Sabit teknik seviyeleri koruyup planın fiyat-bağımlı alanlarını canlı fiyata göre yeniler."""
+    if canli_fiyat is None or canli_fiyat <= 0:
+        return plan
+    fiyat = float(canli_fiyat)
+    pot1 = 100 * (plan.hedef_1 / fiyat - 1)
+    pot2 = 100 * (plan.hedef_2 / fiyat - 1)
+    risk_yuzde = max(0.0, 100 * (fiyat - plan.stop) / fiyat)
+    risk_kazanc = max(0.0, (plan.hedef_1 - fiyat) / max(fiyat - plan.stop, 1e-9))
+    atr_yuzde = 100 * plan.atr / fiyat if fiyat > 0 else plan.atr_yuzde
+    return replace(
+        plan, fiyat=round(fiyat, 2), potansiyel_1=round(pot1, 2),
+        potansiyel_2=round(pot2, 2), risk_yuzde=round(risk_yuzde, 2),
+        risk_kazanc=round(risk_kazanc, 2), atr_yuzde=round(atr_yuzde, 2),
+    )
 
 
 # -------------------------
@@ -1429,6 +1468,10 @@ def teyit_takip_anlik_degerlendir(hisse: str, piyasa: Dict[str, Any]) -> Optiona
     plan = islem_plani_hesapla(hisse)
     if plan is None:
         return None
+    # Portföy ile aynı canlı fiyat kaynağını kullan. Teknik seviyeler kapanmış mumdan,
+    # güncel fiyat ve fiyat-bağımlı R/K hesabı ise seans içi veriden gelir.
+    canli_fiyat = guncel_fiyat_bul(hisse)
+    plan = plan_canli_fiyatla_guncelle(plan, canli_fiyat)
     karar = karar_motoru(hisse, plan, piyasa)
     kalite = int(karar.get("kalite_skoru", 0))
     giris = int(karar.get("giris_skoru", 0))
@@ -1974,7 +2017,7 @@ if portfoy:
     st.sidebar.metric("Toplam değer", f"{tr_fiyat(toplam_deger)} TL")
     st.sidebar.metric("Net K/Z", f"{tr_fiyat(net)} TL", f"{100*net/toplam_maliyet:+.2f}%" if toplam_maliyet else "0%")
 
-st.title("📊 Trade Analiz v12.2")
+st.title("📊 Trade Analiz v12.3")
 col_sub1, col_sub2 = st.columns([0.82, 0.18])
 with col_sub1:
     st.caption(f"Yapısal dönüş teyidi • kapanmış mum analizi • likidite filtresi • hedef ve stop • portföy koçu • tarihsel doğrulama • hızlı tarama • {len(aktif_havuz)} BIST hissesi")
@@ -2390,7 +2433,7 @@ with t1:
 
 with t2:
     st.header("👀 Kapanış Teyidi Takip Havuzu")
-    st.caption("Tarama ekranından seçilen adaylar, gerçek alış yapılmadan canlı biçimde tekrar analiz edilir.")
+    st.caption("Tarama ekranından seçilen adaylar, gerçek alış yapılmadan canlı biçimde tekrar analiz edilir. Fiyatlar canlı portföyle aynı veri motorundan yaklaşık 25 saniyelik önbellekle alınır; sayfa 60 saniyede bir yenilenir.")
     teyit_takip = veri_yukle(TEYIT_TAKIP_DOSYASI, {})
     if not teyit_takip:
         st.info("Takip havuzu boş. Piyasa Tarama sekmesinden hisse seçin.")
@@ -2412,7 +2455,7 @@ with t2:
                 telegram_bildirim_gonder(mesaj)
             ilk = float(kayit.get("ilk_fiyat", plan.fiyat) or plan.fiyat)
             degisim = 100 * (plan.fiyat / ilk - 1) if ilk else 0
-            takip_satirlari.append({"Hisse": h, "Durum": sonuc["durum"], "Güncel": f"{plan.fiyat:.2f} TL", "Takibe Alındı": f"{ilk:.2f} TL", "Değişim": f"%{degisim:+.2f}", "Kalite": sonuc["kalite"], "Giriş": sonuc["giris"], "Teyit": f"{sonuc['teyit']}/7", "Risk": karar.get("risk_profili", {}).get("gosterim", "-"), "Alım Bölgesi": f"{plan.alim_alt:.2f}–{plan.alim_ust:.2f}", "Bölgede": "EVET" if sonuc["fiyat_bolgede"] else "HAYIR", "Hedef 1": f"{plan.hedef_1:.2f}", "Stop": f"{plan.stop:.2f}"})
+            takip_satirlari.append({"Hisse": h, "Durum": sonuc["durum"], "Güncel": f"{plan.fiyat:.2f} TL", "Takibe Alındı": f"{ilk:.2f} TL", "Takipten Sonra": f"%{degisim:+.2f}", "Son Güncelleme": kayit["son_kontrol"], "Kalite": sonuc["kalite"], "Giriş": sonuc["giris"], "Teyit": f"{sonuc['teyit']}/7", "Risk": karar.get("risk_profili", {}).get("gosterim", "-"), "Alım Bölgesi": f"{plan.alim_alt:.2f}–{plan.alim_ust:.2f}", "Bölgede": "EVET" if sonuc["fiyat_bolgede"] else "HAYIR", "Hedef 1": f"{plan.hedef_1:.2f}", "Stop": f"{plan.stop:.2f}"})
             takip_detaylari[h] = sonuc
         veri_kaydet(TEYIT_TAKIP_DOSYASI, teyit_takip)
         st.dataframe(pd.DataFrame(takip_satirlari), use_container_width=True, hide_index=True)
@@ -2425,8 +2468,15 @@ with t2:
             elif det["renk"] == "error": st.error(f"### {det['durum']}")
             else: st.info(f"### {det['durum']}")
             st.write(det["aksiyon"])
-            a,b,c,d,e = st.columns(5)
-            a.metric("Güncel", f"{plan.fiyat:.2f} TL"); b.metric("Kalite", f"{det['kalite']}/100"); c.metric("Giriş", f"{det['giris']}/100"); d.metric("Teyit", f"{det['teyit']}/7"); e.metric("R/K", f"1:{plan.risk_kazanc:.2f}")
+            ilk_takip = float(teyit_takip.get(sec_takip, {}).get("ilk_fiyat", plan.fiyat) or plan.fiyat)
+            takip_degisim = 100 * (plan.fiyat / ilk_takip - 1) if ilk_takip else 0
+            a,b,c,d,e,f = st.columns(6)
+            a.metric("Güncel", f"{plan.fiyat:.2f} TL", f"%{takip_degisim:+.2f}")
+            b.metric("Takibe Alındı", f"{ilk_takip:.2f} TL")
+            c.metric("Kalite", f"{det['kalite']}/100")
+            d.metric("Giriş", f"{det['giris']}/100")
+            e.metric("Teyit", f"{det['teyit']}/7")
+            f.metric("R/K", f"1:{plan.risk_kazanc:.2f}")
             st.info(f"Alım bölgesi **{plan.alim_alt:.2f}–{plan.alim_ust:.2f} TL** | Hedef 1 **{plan.hedef_1:.2f} TL** | Stop **{plan.stop:.2f} TL**")
             if karar.get("nedenler"):
                 for gerekce in karar["nedenler"]: st.markdown(f"- {gerekce}")
