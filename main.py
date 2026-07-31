@@ -18,12 +18,12 @@ from streamlit_autorefresh import st_autorefresh
 import yfinance as yf
 
 # =========================================================
-# TRADE ANALİZ v11.1
+# TRADE ANALİZ v12.1
 # Teknik fırsat analizi + hedef fiyat + dinamik stop + performans analizi
 # =========================================================
 
 st.set_page_config(
-    page_title="Trade Analiz v12.0",
+    page_title="Trade Analiz v12.1",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -512,6 +512,103 @@ def karar_motoru(ticker: str, plan: TradePlan, piyasa: Dict[str, Any]) -> Dict[s
     }
     sonuc["analist_yorumu"] = analist_degerlendirmesi(plan, sonuc, piyasa)
     return sonuc
+
+
+def dinamik_esik_kararlari_uygula(
+    tum_adaylar: List[Dict[str, Any]],
+    kararlar: Dict[str, Dict[str, Any]],
+    piyasa: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Tarama evrenindeki göreli sıralamayı güvenlik tabanlarıyla birleştirir.
+
+    Dinamik eşik tek başına AL üretmez. Önce mutlak kalite, giriş, risk,
+    likidite, yapısal teyit ve R/K tabanları sağlanır; ardından yalnızca
+    evrenin en güçlü yüzdelik dilimindeki hisseler yeşil etikete yükseltilir.
+    """
+    if not tum_adaylar:
+        return {"guclu_esik": 100, "kontrollu_esik": 100, "guclu_adet": 0, "kontrollu_adet": 0}
+
+    puanlar = np.array([float(x.get("Birleşik Puan", 0)) for x in tum_adaylar], dtype=float)
+    # Küçük havuzlarda da anlamlı çalışması için yüzde 99 / 97 eşikleri kullanılır.
+    guclu_esik = float(np.percentile(puanlar, 99))
+    kontrollu_esik = float(np.percentile(puanlar, 97))
+    piyasa_puani = int(piyasa.get("puan", 50))
+    guclu_adet = 0
+    kontrollu_adet = 0
+
+    for satir in tum_adaylar:
+        hisse = str(satir.get("Hisse", ""))
+        kd = kararlar.get(hisse, {})
+        kalite = int(kd.get("kalite_skoru", 0))
+        giris = int(kd.get("giris_skoru", 0))
+        birlesik = int(kd.get("puan", 0))
+        rr = float(satir.get("R/K", 0) or 0)
+        risk_skoru = int(kd.get("risk_profili", {}).get("skor", 100))
+        yapisal = kd.get("yapisal_teyit", {}) or {}
+        teyit = int(yapisal.get("teyit_sayisi", 0))
+        dusen = bool(yapisal.get("dusen_trend"))
+        kovalama = bool(yapisal.get("kovalamaca_riski"))
+        likit = bool(yapisal.get("likit_yeterli", True))
+
+        # Mutlak güvenlik tabanları: göreli olarak en iyi olmak tek başına yeterli değildir.
+        guclu_taban = (
+            kalite >= 68 and giris >= 55 and teyit >= 4 and rr >= 1.40
+            and risk_skoru <= 55 and piyasa_puani >= 45
+            and not dusen and not kovalama and likit
+        )
+        kontrollu_taban = (
+            kalite >= 62 and giris >= 48 and teyit >= 3 and rr >= 1.35
+            and risk_skoru <= 65 and piyasa_puani >= 42
+            and not dusen and not kovalama and likit
+        )
+
+        yeni_karar = str(kd.get("karar", satir.get("Karar", "")))
+        dinamik_dilim = "—"
+        if birlesik >= guclu_esik and guclu_taban:
+            yeni_karar = "🟢 ALIMI DESTEKLİYOR"
+            dinamik_dilim = "İlk %1"
+            guclu_adet += 1
+            kd["pozisyon"] = 50 if piyasa_puani < 60 else 70
+        elif birlesik >= kontrollu_esik and kontrollu_taban:
+            yeni_karar = "🟢 KONTROLLÜ ALIM ADAYI"
+            dinamik_dilim = "İlk %3"
+            kontrollu_adet += 1
+            kd["pozisyon"] = 25 if piyasa_puani < 50 else 35
+        elif kalite >= 58 and giris >= 45:
+            yeni_karar = "🟡 KAPANIŞ TEYİDİ BEKLE"
+            kd["pozisyon"] = 0
+        elif kalite >= 45 or giris >= 45:
+            yeni_karar = "🟠 SADECE İZLE"
+            kd["pozisyon"] = 0
+        else:
+            yeni_karar = "⚪ YENİ POZİSYON AÇMA"
+            kd["pozisyon"] = 0
+
+        kd["karar"] = yeni_karar
+        kd["alim_uygun"] = yeni_karar.startswith("🟢")
+        kd["dinamik_dilim"] = dinamik_dilim
+        kd["dinamik_esikler"] = {
+            "guclu": round(guclu_esik, 1),
+            "kontrollu": round(kontrollu_esik, 1),
+        }
+        nedenler = list(kd.get("nedenler", []))
+        if dinamik_dilim != "—":
+            nedenler.append(f"Tarama evreninde {dinamik_dilim} diliminde")
+        kd["nedenler"] = nedenler
+
+        satir["Karar"] = yeni_karar
+        satir["Pozisyon"] = f"%{int(kd.get('pozisyon', 0))}"
+        satir["Alım Uygunluğu"] = "EVET" if kd.get("alim_uygun") else "HAYIR"
+        satir["Dinamik Dilim"] = dinamik_dilim
+        satir["Karar Nedeni"] = " • ".join(kd.get("nedenler", []))
+
+    return {
+        "guclu_esik": round(guclu_esik, 1),
+        "kontrollu_esik": round(kontrollu_esik, 1),
+        "guclu_adet": guclu_adet,
+        "kontrollu_adet": kontrollu_adet,
+    }
+
 
 def islem_ac(hisse: str, fiyat: float, adet: float, kaynak: str, karar_puani: int = 0) -> None:
     """İşlemi, alım anındaki teknik fotoğrafla birlikte kaydeder."""
@@ -1944,7 +2041,7 @@ with t1:
     with c1:
         minimum_puan = st.slider(
             "Minimum birleşik puan", 30, 80, 45,
-            help="Tarama sonuçları karar motorunun toplam puanına göre süzülür. 45 geniş tarama, 54 kontrollü aday, 60 güçlü aday seviyesidir.",
+            help="Tarama sonuçları karar motorunun toplam puanına göre süzülür. 45 geniş taramadır. Yeşil kararlar tarama evrenindeki ilk %1/%3 dilim ile mutlak güvenlik tabanları birlikte sağlandığında üretilir.",
         )
     with c2:
         sadece_teyitli = st.checkbox(
@@ -2076,6 +2173,22 @@ with t1:
             sinyal_kaydet(plan)
             uygun_sonuclar.append(satir)
 
+        # Tüm evren görüldükten sonra göreli yüzdelik dilimler hesaplanır.
+        dinamik_ozet = dinamik_esik_kararlari_uygula(tum_adaylar, kararlar, piyasa)
+
+        # Dinamik kararlar sonrasında kullanıcı eşiği ve teyit filtresi yeniden uygulanır.
+        uygun_sonuclar = []
+        puan_altinda = 0
+        teyitsiz = 0
+        for satir in tum_adaylar:
+            if int(satir.get("Birleşik Puan", 0)) < int(minimum_puan):
+                puan_altinda += 1
+                continue
+            if sadece_teyitli and satir.get("Alım Uygunluğu") != "EVET":
+                teyitsiz += 1
+                continue
+            uygun_sonuclar.append(satir)
+
         bar.empty()
         durum.empty()
         siralama = lambda z: (z["Birleşik Puan"], z["Kalite Skoru"], z["Giriş Skoru"], z["R/K"])
@@ -2110,7 +2223,10 @@ with t1:
             "teyitsiz": teyitsiz,
             "esik_esnetildi": esik_esnetildi,
             "minimum_puan": minimum_puan,
-            "puan_turu": "karar_puani",
+            "puan_turu": "dinamik_birlesik_puan",
+            "dinamik_ozet": dinamik_ozet,
+            "piyasa_durumu": piyasa.get("durum", "BELİRSİZ"),
+            "piyasa_puani": int(piyasa.get("puan", 50)),
         }
         st.session_state["tarama_aktif"] = False
         st.session_state.pop("tarama_istegi", None)
@@ -2123,6 +2239,23 @@ with t1:
     sonuclar = st.session_state.get("tarama_sonuclari", [])
     tarama_ozeti = st.session_state.get("tarama_ozeti", {})
     if sonuclar:
+        piyasa_puani_goster = int(tarama_ozeti.get("piyasa_puani", 50))
+        piyasa_durumu_goster = str(tarama_ozeti.get("piyasa_durumu", "BELİRSİZ"))
+        if piyasa_puani_goster < 42 or piyasa_durumu_goster == "RİSKLİ":
+            st.error(f"🔴 Piyasa rejimi zayıf ({piyasa_puani_goster}/100). Yeni pozisyonlarda beklemek veya çok küçük pozisyon kullanmak daha uygundur.")
+        elif piyasa_puani_goster < 55:
+            st.warning(f"🟡 Piyasa rejimi nötr/zayıf ({piyasa_puani_goster}/100). Yalnızca en güçlü ve teyitli adaylar değerlendirilmeli.")
+        else:
+            st.success(f"🟢 Piyasa rejimi destekleyici ({piyasa_puani_goster}/100). Teknik teyitli adaylar önceliklendirilebilir.")
+
+        dinamik_goster = tarama_ozeti.get("dinamik_ozet", {}) or {}
+        st.caption(
+            f"Dinamik eşikler — İlk %1: {dinamik_goster.get('guclu_esik', '-')} puan | "
+            f"İlk %3: {dinamik_goster.get('kontrollu_esik', '-')} puan | "
+            f"Alımı destekleyen: {dinamik_goster.get('guclu_adet', 0)} | "
+            f"Kontrollü aday: {dinamik_goster.get('kontrollu_adet', 0)}"
+        )
+
         if tarama_ozeti.get("esik_esnetildi"):
             st.error(
                 "⛔ BUGÜN YENİ POZİSYON AÇMAK ÖNERİLMİYOR. "
