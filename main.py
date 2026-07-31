@@ -18,12 +18,12 @@ from streamlit_autorefresh import st_autorefresh
 import yfinance as yf
 
 # =========================================================
-# TRADE ANALİZ v10.3
+# TRADE ANALİZ v11.0
 # Teknik fırsat analizi + hedef fiyat + dinamik stop + performans analizi
 # =========================================================
 
 st.set_page_config(
-    page_title="Trade Analiz v10.3",
+    page_title="Trade Analiz v11.0",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -404,6 +404,7 @@ def karar_motoru(ticker: str, plan: TradePlan, piyasa: Dict[str, Any]) -> Dict[s
         return {"puan": 0, "karar": "VERİ YOK", "trend": 0, "hacim": 0,
                 "olasılık": 0, "pozisyon": 0, "bilesenler": {},
                 "nedenler": ["Yeterli fiyat verisi yok"]}
+    df = tamamlanmis_gunluk_veri(df)
     x = gostergeleri_hesapla(df).dropna()
     if x.empty:
         return {"puan": 0, "karar": "VERİ YOK", "trend": 0, "hacim": 0,
@@ -431,17 +432,19 @@ def karar_motoru(ticker: str, plan: TradePlan, piyasa: Dict[str, Any]) -> Dict[s
     risk = int(max(0, min(100, 100 - plan.risk_yuzde * 7 - max(0, plan.atr_yuzde - 4) * 4)))
     rr = int(max(0, min(100, plan.risk_kazanc / 3 * 100)))
     piyasa_puani = int(piyasa.get("puan", 50))
+    yapisal = yapisal_teyit_hesapla(x)
 
-    # Ana kalite puanı: piyasa yalnızca %2 ağırlığa sahiptir.
+    # v11: dip puanı azaltıldı; yapısal teyit ve piyasa rejimi güçlendirildi.
     bilesenler = {
-        "Dip dönüş": round(plan.dip_puani * 0.27, 1),
-        "Sinyal güveni": round(plan.sinyal_guveni * 0.19, 1),
-        "Trend": round(trend * 0.20, 1),
-        "Hacim": round(hacim * 0.11, 1),
-        "Momentum": round(momentum * 0.09, 1),
-        "Risk kalitesi": round(risk * 0.07, 1),
-        "Risk/kazanç": round(rr * 0.05, 1),
-        "Piyasa": round(piyasa_puani * 0.02, 1),
+        "Dip bölgesi": round(plan.dip_puani * 0.12, 1),
+        "Yapısal teyit": round(yapisal["skor"] * 0.25, 1),
+        "Sinyal güveni": round(plan.sinyal_guveni * 0.13, 1),
+        "Trend": round(trend * 0.18, 1),
+        "Hacim kalitesi": round(hacim * 0.08, 1),
+        "Momentum": round(momentum * 0.07, 1),
+        "Risk kalitesi": round(risk * 0.04, 1),
+        "Risk/kazanç": round(rr * 0.03, 1),
+        "Piyasa": round(piyasa_puani * 0.10, 1),
     }
     puan = sum(bilesenler.values())
     ayar = ogrenme_ayari(ticker)
@@ -451,32 +454,42 @@ def karar_motoru(ticker: str, plan: TradePlan, piyasa: Dict[str, Any]) -> Dict[s
     # Aşama cezaları tamamen elemez; yalnızca sıralamada aşağı iter.
     asama_cezasi = 0
     if "KOŞULLAR YETERSİZ" in plan.asama:
-        asama_cezasi = -9
-    elif "TEYİT BEKLENİYOR" in plan.asama:
-        asama_cezasi = -3
+        asama_cezasi = -18
+    elif "ALIM İÇİN ERKEN" in plan.asama:
+        asama_cezasi = -12
+    elif "KAPANIŞ TEYİDİ BEKLE" in plan.asama:
+        asama_cezasi = -6
+    if yapisal.get("dusen_trend"):
+        asama_cezasi -= 10
+    if yapisal.get("kovalamaca_riski"):
+        asama_cezasi -= 8
+    if not yapisal.get("likit_yeterli"):
+        asama_cezasi -= 8
     puan += asama_cezasi
 
-    # Piyasa cezası en fazla 3 puan; güçlü hisse yine üst sıralara çıkabilir.
+    # Piyasa rejimi artık gerçek bir filtre görevi görür.
     piyasa_duzeltmesi = 0
-    if piyasa_puani < 45:
+    if piyasa_puani < 40:
+        piyasa_duzeltmesi = -12
+    elif piyasa_puani < 50:
+        piyasa_duzeltmesi = -7
+    elif piyasa_puani < 60:
         piyasa_duzeltmesi = -3
-    elif piyasa_puani < 55:
-        piyasa_duzeltmesi = -1
-    elif piyasa_puani >= 70:
-        piyasa_duzeltmesi = 2
+    elif piyasa_puani >= 72:
+        piyasa_duzeltmesi = 4
     puan += piyasa_duzeltmesi
     puan = int(max(0, min(100, round(puan))))
     risk_profili = risk_profili_hesapla(plan, trend, hacim)
 
-    teyit_var = "KOŞULLAR YETERSİZ" not in plan.asama and "TEYİT BEKLENİYOR" not in plan.asama
-    if puan >= 76 and plan.risk_kazanc >= 1.5 and plan.dip_puani >= 50:
-        karar = "🟢 YÜKSEK POTANSİYEL" if teyit_var else "🟠 ERKEN AŞAMA"
-    elif puan >= 66:
-        karar = "🟡 İZLEME LİSTESİ"
+    teyit_var = bool(yapisal.get("alim_uygun")) and "YAPISAL DÖNÜŞ TEYİTLİ" in plan.asama
+    if puan >= 76 and plan.risk_kazanc >= 1.5 and teyit_var and piyasa_puani >= 50:
+        karar = "🟢 ALIM İÇİN TEYİTLİ ADAY"
+    elif puan >= 66 and yapisal.get("teyit_sayisi", 0) >= 3:
+        karar = "🟡 KAPANIŞ TEYİDİ BEKLE"
     elif puan >= 54:
-        karar = "🟠 SINIRLI POTANSİYEL"
+        karar = "🟠 SADECE İZLE"
     else:
-        karar = "⚪ ZAYIF GÖRÜNÜM"
+        karar = "⚪ YENİ POZİSYON AÇMA"
 
     # Geçmiş veri temelli yaklaşık gerçekleşme olasılığı; kesinlik değildir.
     olasilik = 30 + puan * 0.52
@@ -517,18 +530,37 @@ def karar_motoru(ticker: str, plan: TradePlan, piyasa: Dict[str, Any]) -> Dict[s
         "asama_cezasi": asama_cezasi,
         "piyasa_duzeltmesi": piyasa_duzeltmesi,
         "ogrenme_duzeltmesi": round(ogrenme, 1),
-        "nedenler": nedenler[:7],
+        "yapisal_teyit": yapisal,
+        "alim_uygun": bool(teyit_var),
+        "nedenler": nedenler[:7] + ([f"Yapısal teyit: {yapisal.get('teyit_sayisi', 0)}/7"] if yapisal else []),
     }
     sonuc["analist_yorumu"] = analist_degerlendirmesi(plan, sonuc, piyasa)
     return sonuc
 
 def islem_ac(hisse: str, fiyat: float, adet: float, kaynak: str, karar_puani: int = 0) -> None:
+    """İşlemi, alım anındaki teknik fotoğrafla birlikte kaydeder."""
     islemler = veri_yukle(ISLEM_DOSYASI, [])
+    snapshot: Dict[str, Any] = {}
+    try:
+        df = tamamlanmis_gunluk_veri(fiyat_verisi_getir(hisse, "2y"))
+        plan = islem_plani_hesapla(hisse, df)
+        piyasa = piyasa_rejimi_hesapla()
+        karar = karar_motoru(hisse, plan, piyasa) if plan else {}
+        if plan:
+            snapshot = {
+                "plan": asdict(plan),
+                "karar": karar,
+                "piyasa": piyasa,
+                "veri_mumu": str(pd.Timestamp(df.index[-1]).date()) if not df.empty else "",
+                "kayit_zamani": datetime.now().isoformat(timespec="seconds"),
+            }
+    except Exception as exc:
+        snapshot = {"snapshot_hatasi": str(exc)}
     islemler.append({
         "id": datetime.now().strftime("%Y%m%d%H%M%S%f"), "hisse": hisse,
         "alis_tarihi": datetime.now().strftime("%Y-%m-%d %H:%M"), "alis_fiyati": float(fiyat),
         "adet": float(adet), "kaynak": kaynak, "karar_puani": int(karar_puani),
-        "durum": "AÇIK",
+        "teknik_snapshot": snapshot, "durum": "AÇIK",
     })
     veri_kaydet(ISLEM_DOSYASI, islemler)
 
@@ -618,6 +650,67 @@ def guncel_fiyat_bul(ticker_name: str) -> Optional[float]:
 # -------------------------
 # Teknik göstergeler
 # -------------------------
+def tamamlanmis_gunluk_veri(df: pd.DataFrame) -> pd.DataFrame:
+    """BIST seansı sürerken henüz tamamlanmamış bugünkü günlük mumu analizden çıkarır."""
+    if df.empty:
+        return df
+    sonuc = df.copy()
+    try:
+        son_tarih = pd.Timestamp(sonuc.index[-1]).date()
+        simdi = datetime.now()
+        seans_gunu = simdi.weekday() < 5
+        seans_tamamlanmadi = simdi.hour < 18 or (simdi.hour == 18 and simdi.minute < 15)
+        if son_tarih == simdi.date() and seans_gunu and seans_tamamlanmadi and len(sonuc) > 1:
+            sonuc = sonuc.iloc[:-1].copy()
+    except Exception:
+        pass
+    return sonuc
+
+
+def yapisal_teyit_hesapla(x: pd.DataFrame) -> Dict[str, Any]:
+    """İlk tepkiyi gerçek trend dönüşünden ayırmak için fiyat yapısı teyitlerini hesaplar."""
+    if x.empty or len(x) < 25:
+        return {"skor": 0, "teyit_sayisi": 0, "alim_uygun": False, "nedenler": ["Yapısal teyit için veri yetersiz"]}
+    r = x.iloc[-1]
+    onceki = x.iloc[-2]
+    close = float(r["Close"]); high = float(r["High"]); low = float(r["Low"]); open_ = float(r["Open"])
+    ema9 = float(r.get("EMA9", close)); ema9_onceki = float(onceki.get("EMA9", ema9))
+    sma20 = float(r.get("SMA20", close)); sma50 = float(r.get("SMA50", close))
+    macd_hist = float(r.get("MACD_HIST", 0)); macd_onceki = float(onceki.get("MACD_HIST", macd_hist))
+    vol_ratio = float(r.get("VOL_RATIO", 1.0))
+    mum_konumu = (close-low)/max(high-low, 1e-9)
+    onceki_5_yuksek = float(x["High"].iloc[-6:-1].max())
+    son_5_dip = float(x["Low"].iloc[-5:].min())
+    onceki_5_dip = float(x["Low"].iloc[-10:-5].min())
+    getiri_5 = 100*(close/float(x["Close"].iloc[-6])-1)
+    ort_islem_degeri = float((x["Close"]*x["Volume"]).tail(20).mean())
+
+    teyitler = {
+        "EMA9 üzerinde ve EMA9 yükseliyor": close > ema9 and ema9 > ema9_onceki,
+        "SMA20 üzerinde": close > sma20,
+        "Daha yüksek dip oluşumu": son_5_dip > onceki_5_dip,
+        "Son 5 günlük tepe kırıldı": close > onceki_5_yuksek,
+        "MACD momentumu güçleniyor": macd_hist > macd_onceki,
+        "Mum güçlü kapandı": close > open_ and mum_konumu >= 0.65,
+        "Hacim fiyatı destekliyor": vol_ratio >= 1.2 and close > open_ and mum_konumu >= 0.60,
+    }
+    teyit_sayisi = sum(bool(v) for v in teyitler.values())
+    skor = round(100*teyit_sayisi/len(teyitler))
+    kovalamaca_riski = getiri_5 >= 8 or (100*(close/open_-1) >= 3 and mum_konumu >= 0.85)
+    dusen_trend = close < sma20 and sma20 < sma50
+    likit_yeterli = ort_islem_degeri >= 20_000_000
+    alim_uygun = teyit_sayisi >= 4 and not dusen_trend and not kovalamaca_riski and likit_yeterli
+    nedenler = [k for k,v in teyitler.items() if v]
+    if dusen_trend: nedenler.append("UYARI: Fiyat ve SMA20, SMA50 altında; düşen trend sürüyor")
+    if kovalamaca_riski: nedenler.append("UYARI: Son hareket kovalanmış olabilir")
+    if not likit_yeterli: nedenler.append("UYARI: Ortalama işlem değeri düşük; kayma riski yüksek")
+    return {
+        "skor": int(skor), "teyit_sayisi": int(teyit_sayisi), "alim_uygun": bool(alim_uygun),
+        "kovalamaca_riski": bool(kovalamaca_riski), "dusen_trend": bool(dusen_trend),
+        "likit_yeterli": bool(likit_yeterli), "ortalama_islem_degeri": round(ort_islem_degeri, 0),
+        "mum_konumu": round(mum_konumu, 2), "getiri_5": round(getiri_5, 2), "nedenler": nedenler
+    }
+
 def gostergeleri_hesapla(df: pd.DataFrame) -> pd.DataFrame:
     x = df.copy()
     close, high, low, volume = x["Close"], x["High"], x["Low"], x["Volume"]
@@ -820,6 +913,9 @@ def islem_plani_hesapla(ticker_name: str, df_raw: Optional[pd.DataFrame] = None)
     df = fiyat_verisi_getir(ticker_name, "2y") if df_raw is None else df_raw.copy()
     if df.empty or len(df) < 55:
         return None
+    df = tamamlanmis_gunluk_veri(df)
+    if len(df) < 55:
+        return None
     x = gostergeleri_hesapla(df)
     son = x.iloc[-1]
     onceki = x.iloc[-2]
@@ -835,14 +931,14 @@ def islem_plani_hesapla(ticker_name: str, df_raw: Optional[pd.DataFrame] = None)
 
     # Ucuzluk / dip bölgesi
     if 28 <= rsi <= 42:
-        puan += 18
-        nedenler.append(f"RSI {rsi:.1f}: dip bölgesine yakın")
+        puan += 8
+        nedenler.append(f"RSI {rsi:.1f}: dip bölgesine yakın; tek başına dönüş teyidi değildir")
     elif 42 < rsi <= 50:
-        puan += 10
+        puan += 5
         nedenler.append(f"RSI {rsi:.1f}: nötr-alt bölge")
     elif rsi < 28:
-        puan += 8
-        uyarilar.append("RSI aşırı satımda; düşüş henüz bitmemiş olabilir")
+        puan -= 4
+        uyarilar.append("RSI aşırı satımda; düşen bıçak riski nedeniyle teyit beklenmeli")
     elif rsi >= 70:
         puan -= 15
         uyarilar.append("RSI aşırı alım bölgesinde")
@@ -850,7 +946,7 @@ def islem_plani_hesapla(ticker_name: str, df_raw: Optional[pd.DataFrame] = None)
     bb_alt = float(son["BB_LOWER"]) if pd.notna(son["BB_LOWER"]) else fiyat
     bb_orta = float(son["SMA20"]) if pd.notna(son["SMA20"]) else fiyat
     if fiyat <= bb_alt * 1.03:
-        puan += 12
+        puan += 4
         nedenler.append("Fiyat Bollinger alt bandına yakın")
     if fiyat > bb_alt and float(onceki["Close"]) <= float(onceki["BB_LOWER"] if pd.notna(onceki["BB_LOWER"]) else onceki["Close"]):
         puan += 8
@@ -858,7 +954,7 @@ def islem_plani_hesapla(ticker_name: str, df_raw: Optional[pd.DataFrame] = None)
 
     sma50 = float(son["SMA50"]) if pd.notna(son["SMA50"]) else fiyat
     if abs(fiyat - sma50) / max(sma50, 1e-9) <= 0.04:
-        puan += 10
+        puan += 5
         nedenler.append("50 günlük ortalamaya yakın destek")
 
     # Dönüş teyitleri
@@ -903,8 +999,24 @@ def islem_plani_hesapla(ticker_name: str, df_raw: Optional[pd.DataFrame] = None)
         puan -= 8
         uyarilar.append("Son 20 günlük düşüş çok sert")
     if atr_pct > 7:
-        puan -= 8
+        puan -= 12
         uyarilar.append("Oynaklık çok yüksek")
+
+    yapisal = yapisal_teyit_hesapla(x)
+    puan += round(yapisal["skor"] * 0.28)
+    if yapisal.get("dusen_trend"):
+        puan -= 18
+        uyarilar.append("Fiyat yapısı hâlâ düşen trendde")
+    if yapisal.get("kovalamaca_riski"):
+        puan -= 14
+        uyarilar.append("Kısa vadeli yükselişin tepesine yakın giriş riski")
+    if not yapisal.get("likit_yeterli"):
+        puan -= 12
+        uyarilar.append("Likidite zayıf; piyasadan emirlerde yüksek kayma riski")
+    if yapisal.get("teyit_sayisi", 0) >= 4:
+        nedenler.append(f"Yapısal dönüş teyidi {yapisal['teyit_sayisi']}/7")
+    else:
+        uyarilar.append(f"Yapısal dönüş teyidi yetersiz: {yapisal.get('teyit_sayisi', 0)}/7")
 
     haber_skor, haber_notu = haber_duygu_skori(ticker_name)
     puan += haber_skor * 2
@@ -913,19 +1025,21 @@ def islem_plani_hesapla(ticker_name: str, df_raw: Optional[pd.DataFrame] = None)
 
     dip_puani = int(max(0, min(100, puan)))
 
-    # Aşama sınıflandırması
-    teyit_sayisi = sum([
+    # Aşama sınıflandırması: yüksek puan tek başına yeterli değildir.
+    klasik_teyit = sum([
         bool(macd_yukari),
         bool(stoch_yukari),
         bool(fiyat > float(son["EMA9"])),
         bool(vol_ratio >= 1.2 and gunluk > 0),
     ])
-    if dip_puani >= 75 and teyit_sayisi >= 2:
-        asama = "🟢 TEYİTLİ TOPARLANMA"
-    elif dip_puani >= 60 and teyit_sayisi >= 1:
-        asama = "🟡 TEYİTLİ ALIM BÖLGESİ"
-    elif dip_puani >= 50:
-        asama = "🟠 TOPARLANMA ADAYI / TEYİT BEKLENİYOR"
+    yapisal_sayi = int(yapisal.get("teyit_sayisi", 0))
+    teyit_sayisi = klasik_teyit + yapisal_sayi
+    if dip_puani >= 72 and yapisal.get("alim_uygun"):
+        asama = "🟢 YAPISAL DÖNÜŞ TEYİTLİ"
+    elif dip_puani >= 60 and yapisal_sayi >= 3 and not yapisal.get("dusen_trend"):
+        asama = "🟡 DÖNÜŞ GELİŞİYOR / KAPANIŞ TEYİDİ BEKLE"
+    elif dip_puani >= 48:
+        asama = "🟠 İZLEME ADAYI / ALIM İÇİN ERKEN"
     else:
         asama = "🔴 KOŞULLAR YETERSİZ"
 
@@ -1738,7 +1852,7 @@ if portfoy:
 st.title("📊 Trade Analiz v10.2")
 col_sub1, col_sub2 = st.columns([0.82, 0.18])
 with col_sub1:
-    st.caption(f"Karar desteği • alım bölgesi • hedef ve stop • net aksiyonlu portföy koçu • tarihsel doğrulama • hızlı tarama • {len(aktif_havuz)} BIST hissesi")
+    st.caption(f"Yapısal dönüş teyidi • kapanmış mum analizi • likidite filtresi • hedef ve stop • portföy koçu • tarihsel doğrulama • hızlı tarama • {len(aktif_havuz)} BIST hissesi")
 with col_sub2:
     if st.session_state.get("tarama_aktif", False):
         st.info("⏸️ Tarama sırasında otomatik yenileme durduruldu")
@@ -1948,6 +2062,8 @@ with t1:
                 "RSI": plan.rsi,
                 "Trend": karar["trend"],
                 "Hacim": karar["hacim"],
+                "Yapısal Teyit": f"{karar.get('yapisal_teyit', {}).get('teyit_sayisi', 0)}/7",
+                "Alım Uygunluğu": "EVET" if karar.get("alim_uygun") else "HAYIR",
                 "Karar Nedeni": " • ".join(karar["nedenler"]),
                 "Analist Değerlendirmesi": karar.get("analist_yorumu", ""),
                 "Puan Dağılımı": " | ".join(f"{k}: +{v}" for k, v in karar.get("bilesenler", {}).items())
@@ -1969,7 +2085,7 @@ with t1:
             if plan.dip_puani < minimum_puan:
                 puan_altinda += 1
                 continue
-            if sadece_teyitli and ("TEYİT BEKLENİYOR" in plan.asama or "KOŞULLAR YETERSİZ" in plan.asama):
+            if sadece_teyitli and not karar.get("alim_uygun", False):
                 teyitsiz += 1
                 continue
             sinyal_kaydet(plan)
@@ -2016,9 +2132,9 @@ with t1:
     tarama_ozeti = st.session_state.get("tarama_ozeti", {})
     if sonuclar:
         if tarama_ozeti.get("esik_esnetildi"):
-            st.warning(
-                f"Seçtiğiniz koşullara tam uyan hisse bulunamadı. Bunun yerine en yüksek puanlı "
-                f"{len(sonuclar)} hisse izleme adayı olarak gösteriliyor. Bunlar doğrudan al sinyali değildir."
+            st.error(
+                "⛔ BUGÜN YENİ POZİSYON AÇMAK ÖNERİLMİYOR. "
+                f"Koşullara tam uyan hisse bulunamadı; gösterilen {len(sonuclar)} hisse yalnızca izleme adayıdır."
             )
         else:
             st.success(f"{len(sonuclar)} aday listelendi")
