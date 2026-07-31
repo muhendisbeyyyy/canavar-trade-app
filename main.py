@@ -23,7 +23,7 @@ import yfinance as yf
 # =========================================================
 
 st.set_page_config(
-    page_title="Trade Analiz v11.1",
+    page_title="Trade Analiz v11.2",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -454,29 +454,29 @@ def karar_motoru(ticker: str, plan: TradePlan, piyasa: Dict[str, Any]) -> Dict[s
     # Aşama cezaları tamamen elemez; yalnızca sıralamada aşağı iter.
     asama_cezasi = 0
     if "KOŞULLAR YETERSİZ" in plan.asama:
-        asama_cezasi = -14
+        asama_cezasi = -6
     elif "ALIM İÇİN ERKEN" in plan.asama:
-        asama_cezasi = -8
-    elif "KAPANIŞ TEYİDİ BEKLE" in plan.asama:
         asama_cezasi = -3
+    elif "KAPANIŞ TEYİDİ BEKLE" in plan.asama:
+        asama_cezasi = 0
     if yapisal.get("dusen_trend"):
-        asama_cezasi -= 8
+        asama_cezasi -= 4
     if yapisal.get("kovalamaca_riski"):
-        asama_cezasi -= 6
+        asama_cezasi -= 3
     if not yapisal.get("likit_yeterli"):
-        asama_cezasi -= 6
+        asama_cezasi -= 4
     puan += asama_cezasi
 
     # Piyasa rejimi artık gerçek bir filtre görevi görür.
     piyasa_duzeltmesi = 0
     if piyasa_puani < 40:
-        piyasa_duzeltmesi = -8
+        piyasa_duzeltmesi = -2
     elif piyasa_puani < 50:
         piyasa_duzeltmesi = -4
     elif piyasa_puani < 60:
-        piyasa_duzeltmesi = -2
+        piyasa_duzeltmesi = 0
     elif piyasa_puani >= 72:
-        piyasa_duzeltmesi = 4
+        piyasa_duzeltmesi = 2
     puan += piyasa_duzeltmesi
     puan = int(max(0, min(100, round(puan))))
     risk_profili = risk_profili_hesapla(plan, trend, hacim)
@@ -484,13 +484,13 @@ def karar_motoru(ticker: str, plan: TradePlan, piyasa: Dict[str, Any]) -> Dict[s
     teyit_sayisi_yapisal = int(yapisal.get("teyit_sayisi", 0))
     teyit_var = bool(yapisal.get("alim_uygun"))
     guclu_teyit = teyit_sayisi_yapisal >= 4 and not yapisal.get("dusen_trend") and not yapisal.get("kovalamaca_riski")
-    if puan >= 68 and plan.risk_kazanc >= 1.4 and guclu_teyit and piyasa_puani >= 45:
+    if puan >= 60 and plan.risk_kazanc >= 1.4 and guclu_teyit and piyasa_puani >= 45:
         karar = "🟢 ALIM İÇİN TEYİTLİ ADAY"
-    elif puan >= 60 and plan.risk_kazanc >= 1.4 and teyit_var and piyasa_puani >= 45:
+    elif puan >= 54 and plan.risk_kazanc >= 1.4 and teyit_var and piyasa_puani >= 45:
         karar = "🟢 KONTROLLÜ ALIM ADAYI"
-    elif puan >= 56 and teyit_sayisi_yapisal >= 3:
+    elif puan >= 49 and teyit_sayisi_yapisal >= 2:
         karar = "🟡 KAPANIŞ TEYİDİ BEKLE"
-    elif puan >= 52:
+    elif puan >= 45:
         karar = "🟠 SADECE İZLE"
     else:
         karar = "⚪ YENİ POZİSYON AÇMA"
@@ -511,9 +511,9 @@ def karar_motoru(ticker: str, plan: TradePlan, piyasa: Dict[str, Any]) -> Dict[s
         pozisyon = 70
     else:
         pozisyon = 100
-    if puan < 60:
+    if puan < 54:
         pozisyon = min(pozisyon, 25)
-    elif puan < 68:
+    elif puan < 60:
         pozisyon = min(pozisyon, 50)
 
     nedenler = []
@@ -1291,9 +1291,9 @@ def gunun_karar_ozeti(en_iyi: Dict[str, Any], piyasa: Dict[str, Any]) -> str:
     alim = str(en_iyi.get("Alım Bölgesi", "-"))
     hedef = str(en_iyi.get("Hedef 1", "-"))
     stop = str(en_iyi.get("Stop", "-"))
-    if puan >= 68 and "YÜKSEK" not in risk:
+    if puan >= 60 and "YÜKSEK" not in risk:
         eylem = "Kademeli alım için değerlendirilebilir; tek seferde tam pozisyon yerine planlı giriş daha uygundur."
-    elif puan >= 60:
+    elif puan >= 54:
         eylem = "İzleme listesinde tutulmalı; alım için fiyatın belirtilen bölgeye gelmesi ve teknik teyidin korunması beklenmelidir."
     else:
         eylem = "Bugün doğrudan alım yerine izleme yaklaşımı daha uygundur."
@@ -1857,7 +1857,7 @@ if portfoy:
     st.sidebar.metric("Toplam değer", f"{tr_fiyat(toplam_deger)} TL")
     st.sidebar.metric("Net K/Z", f"{tr_fiyat(net)} TL", f"{100*net/toplam_maliyet:+.2f}%" if toplam_maliyet else "0%")
 
-st.title("📊 Trade Analiz v11.1")
+st.title("📊 Trade Analiz v11.2")
 col_sub1, col_sub2 = st.columns([0.82, 0.18])
 with col_sub1:
     st.caption(f"Yapısal dönüş teyidi • kapanmış mum analizi • likidite filtresi • hedef ve stop • portföy koçu • tarihsel doğrulama • hızlı tarama • {len(aktif_havuz)} BIST hissesi")
@@ -1952,7 +1952,7 @@ with t0:
                             st.caption(f"Medyan getiri: %{rapor['medyan']:+.2f} | Maksimum düşüş: %{rapor['maks_dusus']} | Kullanılan dip puanı eşiği: {rapor['esik']}")
 
         en_iyi = top10[0]
-        if int(en_iyi.get("Karar Puanı", 0)) < 60:
+        if int(en_iyi.get("Karar Puanı", 0)) < 54:
             st.warning("Bugün yüksek güvenli ve teyitli bir fırsat bulunmuyor. Liste, piyasadaki göreceli olarak en iyi adayları gösteriyor; küçük pozisyon veya izleme yaklaşımı daha uygundur.")
         elif piyasa_anlik["durum"] == "RİSKLİ":
             st.warning(f"Piyasa zayıf. En iyi hisseler listeleniyor ancak normal pozisyonun yaklaşık %{risk_orani}'i öneriliyor.")
@@ -1973,8 +1973,8 @@ with t1:
     c1, c2, c3 = st.columns(3)
     with c1:
         minimum_puan = st.slider(
-            "Minimum karar puanı", 40, 80, 52,
-            help="Tarama sonuçları karar motorunun toplam puanına göre süzülür. 52 dengeli, 60 seçici, 68 güçlü aday seviyesidir.",
+            "Minimum karar puanı", 35, 80, 45,
+            help="Tarama sonuçları karar motorunun toplam puanına göre süzülür. 45 geniş tarama, 54 kontrollü aday, 60 güçlü aday seviyesidir.",
         )
     with c2:
         sadece_teyitli = st.checkbox(
@@ -2109,9 +2109,15 @@ with t1:
         tum_adaylar = sorted(tum_adaylar, key=siralama, reverse=True)
 
         esik_esnetildi = False
-        if not uygun_sonuclar and tum_adaylar:
-            # Kullanıcı boş ekran görmesin: en yüksek puanlıları izleme listesi olarak göster.
-            uygun_sonuclar = tum_adaylar[: min(int(maksimum_hisse), 10)]
+        # Eşik üstü sonuç az olsa bile evrenin en iyi adaylarını ayrıca göster.
+        # Karar etiketi değiştirilmez; zayıf adaylar yalnızca izleme amacıyla listelenir.
+        minimum_gosterim = min(int(maksimum_hisse), 10)
+        if len(uygun_sonuclar) < minimum_gosterim and tum_adaylar:
+            mevcut = {x["Hisse"] for x in uygun_sonuclar}
+            eksik = minimum_gosterim - len(uygun_sonuclar)
+            ekler = [x for x in tum_adaylar if x["Hisse"] not in mevcut][:eksik]
+            uygun_sonuclar.extend(ekler)
+            uygun_sonuclar = sorted(uygun_sonuclar, key=siralama, reverse=True)[: int(maksimum_hisse)]
             esik_esnetildi = True
 
         st.session_state["tarama_sonuclari"] = uygun_sonuclar
