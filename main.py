@@ -2030,7 +2030,7 @@ with col_sub2:
             f"""
             <div style="font-family:Arial;display:flex;justify-content:flex-end;gap:6px;align-items:center">
               <span style="color:#888;font-size:11px">Yenileme:</span>
-              <span id="countdown_{reset_key}" style="font-size:13px;font-weight:bold;background:#1f232a;padding:2px 8px;border-radius:4px">60s</span>
+              <span id="countdown_{reset_key}" style="font-size:13px;font-weight:bold;color:#ffffff;background:#ff4b4b;padding:2px 8px;border-radius:4px;border:1px solid #ffffff">60s</span>
             </div>
             <script>
               let t=60; const e=document.getElementById('countdown_{reset_key}');
