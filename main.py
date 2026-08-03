@@ -619,11 +619,18 @@ def islem_ac(hisse: str, fiyat: float, adet: float, kaynak: str, karar_puani: in
         df = tamamlanmis_gunluk_veri(fiyat_verisi_getir(hisse, "2y"))
         plan = islem_plani_hesapla(hisse, df)
         piyasa = piyasa_rejimi_hesapla()
+        if plan:
+            # İşlem günlüğündeki teknik fotoğrafı teorik kapanış fiyatıyla değil,
+            # kullanıcının gerçekten gerçekleşen alış fiyatıyla kaydet.
+            plan = plan_canli_fiyatla_guncelle(plan, float(fiyat))
         karar = karar_motoru(hisse, plan, piyasa) if plan else {}
         if plan:
             snapshot = {
                 "plan": asdict(plan),
                 "karar": karar,
+                "giris_guvenligi": fiyat_guvenligi_degerlendir(
+                    plan, str(karar.get("karar", "-")), canli_dogrulandi=True
+                ),
                 "piyasa": piyasa,
                 "veri_mumu": str(pd.Timestamp(df.index[-1]).date()) if not df.empty else "",
                 "kayit_zamani": datetime.now().isoformat(timespec="seconds"),
@@ -743,6 +750,52 @@ def guncel_fiyat_bul(ticker_name: str) -> Optional[float]:
     return round(float(df["Close"].iloc[-1]), 2)
 
 
+@st.cache_data(ttl=25, show_spinner=False)
+def toplu_canli_fiyatlar_getir(ticker_names: Tuple[str, ...]) -> Dict[str, float]:
+    """Tarama sonuçlarının canlı fiyatlarını tek ağ isteğiyle getirir.
+
+    Tarama evreninin tamamı için yeni istek yapılmaz; yalnızca ekranda gösterilen
+    adaylar güncellenir. Böylece güvenlik kontrolü taramayı gereksiz yere yavaşlatmaz.
+    """
+    ticker_names = tuple(dict.fromkeys(str(x).upper() for x in ticker_names if x))
+    if not ticker_names:
+        return {}
+    yahoo = [f"{x}.IS" for x in ticker_names]
+    sonuc: Dict[str, float] = {}
+    try:
+        df = yf.download(
+            yahoo, period="1d", interval="1m", auto_adjust=True,
+            progress=False, threads=True, group_by="column", timeout=15,
+        )
+        if df.empty:
+            return sonuc
+        if len(ticker_names) == 1 and not isinstance(df.columns, pd.MultiIndex):
+            close = pd.to_numeric(df.get("Close"), errors="coerce").dropna()
+            if not close.empty:
+                sonuc[ticker_names[0]] = round(float(close.iloc[-1]), 2)
+            return sonuc
+        if not isinstance(df.columns, pd.MultiIndex):
+            return sonuc
+        level0 = set(map(str, df.columns.get_level_values(0)))
+        level1 = set(map(str, df.columns.get_level_values(1)))
+        for ticker_name, yahoo_name in zip(ticker_names, yahoo):
+            try:
+                if "Close" in level0 and yahoo_name in level1:
+                    close = df[("Close", yahoo_name)]
+                elif yahoo_name in level0 and "Close" in level1:
+                    close = df[(yahoo_name, "Close")]
+                else:
+                    continue
+                close = pd.to_numeric(close, errors="coerce").dropna()
+                if not close.empty:
+                    sonuc[ticker_name] = round(float(close.iloc[-1]), 2)
+            except Exception:
+                continue
+    except Exception:
+        return sonuc
+    return sonuc
+
+
 def plan_canli_fiyatla_guncelle(plan: TradePlan, canli_fiyat: Optional[float]) -> TradePlan:
     """Sabit teknik seviyeleri koruyup planın fiyat-bağımlı alanlarını canlı fiyata göre yeniler."""
     if canli_fiyat is None or canli_fiyat <= 0:
@@ -758,6 +811,117 @@ def plan_canli_fiyatla_guncelle(plan: TradePlan, canli_fiyat: Optional[float]) -
         potansiyel_2=round(pot2, 2), risk_yuzde=round(risk_yuzde, 2),
         risk_kazanc=round(risk_kazanc, 2), atr_yuzde=round(atr_yuzde, 2),
     )
+
+
+def fiyat_guvenligi_degerlendir(
+    plan: TradePlan,
+    model_karari: str,
+    canli_dogrulandi: bool,
+    minimum_rk: float = 1.40,
+) -> Dict[str, Any]:
+    """Yeni giriş için canlı fiyat, alım bölgesi ve R/K güvenlik kapısı."""
+    model_karari = str(model_karari or "-")
+    sonuc: Dict[str, Any] = {
+        "model_karari": model_karari,
+        "karar": model_karari,
+        "alim_uygun": False,
+        "canli_dogrulandi": bool(canli_dogrulandi),
+        "bolgede": False,
+        "bolge_durumu": "CANLI FİYAT YOK",
+        "maksimum_alim": round(float(plan.alim_ust), 2),
+        "canli_rk": round(float(plan.risk_kazanc), 2),
+        "neden": "Canlı fiyat doğrulanamadı.",
+    }
+    if not canli_dogrulandi:
+        sonuc["karar"] = "⚪ CANLI FİYAT DOĞRULANAMADI"
+        return sonuc
+
+    fiyat = float(plan.fiyat)
+    sonuc["bolgede"] = bool(plan.alim_alt <= fiyat <= plan.alim_ust)
+    if fiyat > plan.alim_ust:
+        sonuc.update({
+            "karar": "⚠️ ALIM BÖLGESİ KAÇTI — FİYATI KOVALAMA",
+            "bolge_durumu": "ÜSTÜNDE",
+            "neden": f"Canlı fiyat {fiyat:.2f} TL, maksimum alım {plan.alim_ust:.2f} TL üzerinde.",
+        })
+        return sonuc
+    if fiyat < plan.alim_alt:
+        sonuc.update({
+            "karar": "🟡 ALIM BÖLGESİ BEKLE",
+            "bolge_durumu": "ALTINDA",
+            "neden": f"Canlı fiyat {fiyat:.2f} TL, alım bölgesi {plan.alim_alt:.2f}–{plan.alim_ust:.2f} TL dışında.",
+        })
+        return sonuc
+
+    sonuc["bolge_durumu"] = "İÇİNDE"
+    if plan.risk_kazanc < minimum_rk:
+        sonuc.update({
+            "karar": "⚠️ R/K ZAYIFLADI — YENİ GİRİŞ YAPMA",
+            "neden": f"Canlı fiyatla R/K 1:{plan.risk_kazanc:.2f}; gerekli taban 1:{minimum_rk:.2f}.",
+        })
+        return sonuc
+
+    sonuc["alim_uygun"] = model_karari.startswith("🟢")
+    sonuc["neden"] = (
+        "Canlı fiyat alım bölgesinde ve R/K tabanını karşılıyor."
+        if sonuc["alim_uygun"]
+        else "Fiyat güvenliği uygun; teknik karar henüz yeşil değil."
+    )
+    return sonuc
+
+
+def tarama_sonuclarini_canli_guvenlikle_guncelle(
+    sonuclar: List[Dict[str, Any]],
+    piyasa: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Gösterilen tarama adaylarına canlı yeni-giriş güvenliği uygular."""
+    if not sonuclar:
+        return []
+    hisseler = tuple(str(x.get("Hisse", "")) for x in sonuclar if x.get("Hisse"))
+    canli_fiyatlar = toplu_canli_fiyatlar_getir(hisseler)
+    planlar = st.session_state.get("tarama_planlari", {})
+    kararlar = st.session_state.get("tarama_kararlari", {})
+    guncelleme_zamani = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    guncel_sonuclar: List[Dict[str, Any]] = []
+
+    for eski_satir in sonuclar:
+        satir = dict(eski_satir)
+        hisse = str(satir.get("Hisse", ""))
+        plan_dict = planlar.get(hisse)
+        if not plan_dict:
+            guncel_sonuclar.append(satir)
+            continue
+        plan = TradePlan(**plan_dict)
+        analiz_fiyati = float(plan.fiyat)
+        canli_fiyat = canli_fiyatlar.get(hisse)
+        canli_plan = plan_canli_fiyatla_guncelle(plan, canli_fiyat)
+        model_karari = str(kararlar.get(hisse, {}).get("karar", satir.get("Karar", "-")))
+        anlik_karar = karar_motoru(hisse, canli_plan, piyasa) if canli_fiyat is not None else kararlar.get(hisse, {})
+        guvenlik = fiyat_guvenligi_degerlendir(
+            canli_plan, model_karari, canli_dogrulandi=canli_fiyat is not None
+        )
+
+        satir.update({
+            "Model Kararı": model_karari,
+            "Karar": guvenlik["karar"],
+            "Analiz Fiyatı": f"{analiz_fiyati:.2f}",
+            "Fiyat": f"{canli_plan.fiyat:.2f}" if canli_fiyat is not None else "—",
+            "Fiyat Güncellendi": guncelleme_zamani if canli_fiyat is not None else "ALINAMADI",
+            "Maksimum Alım": f"{canli_plan.alim_ust:.2f}",
+            "Bölge Durumu": guvenlik["bolge_durumu"],
+            "Canlı R/K": guvenlik["canli_rk"],
+            "Alım Uygunluğu": "EVET" if guvenlik["alim_uygun"] else "HAYIR",
+            "Giriş Güvenliği": guvenlik["neden"],
+            "Giriş Skoru": int(anlik_karar.get("giris_skoru", satir.get("Giriş Skoru", 0))),
+            "Risk": anlik_karar.get("risk_profili", {}).get("gosterim", satir.get("Risk", "-")),
+            "Risk Puanı": anlik_karar.get("risk_profili", {}).get("skor", satir.get("Risk Puanı", 0)),
+            "Hedef 1": f"{canli_plan.hedef_1:.2f} (%{canli_plan.potansiyel_1:.1f})",
+            "Hedef 2": f"{canli_plan.hedef_2:.2f} (%{canli_plan.potansiyel_2:.1f})",
+            "Stop": f"{canli_plan.stop:.2f} (-%{canli_plan.risk_yuzde:.1f})",
+            "R/K": canli_plan.risk_kazanc,
+        })
+        guncel_sonuclar.append(satir)
+    return guncel_sonuclar
 
 
 # -------------------------
@@ -1480,9 +1644,20 @@ def teyit_takip_anlik_degerlendir(hisse: str, piyasa: Dict[str, Any]) -> Optiona
     fiyat_bolgede = plan.alim_alt <= plan.fiyat <= plan.alim_ust
     asama = str(plan.asama)
     engeller = karar.get("engeller", []) or []
-    if kalite >= 68 and giris >= 55 and teyit >= 4 and risk_puani <= 55 and plan.risk_kazanc >= 1.40 and fiyat_bolgede and not engeller:
+    guvenlik = fiyat_guvenligi_degerlendir(
+        plan, str(karar.get("karar", "-")), canli_dogrulandi=canli_fiyat is not None
+    )
+    if not guvenlik["canli_dogrulandi"]:
+        durum, aksiyon, renk = "⚪ CANLI FİYAT DOĞRULANAMADI", "Yeni giriş yapmadan önce canlı fiyat aracı kurum ekranından doğrulanmalı.", "info"
+    elif plan.fiyat > plan.alim_ust:
+        durum, aksiyon, renk = "⚠️ ALIM BÖLGESİ KAÇTI — FİYATI KOVALAMA", guvenlik["neden"], "warning"
+    elif plan.fiyat < plan.alim_alt:
+        durum, aksiyon, renk = "🟡 ALIM BÖLGESİ BEKLE", guvenlik["neden"], "warning"
+    elif plan.risk_kazanc < 1.40:
+        durum, aksiyon, renk = "⚠️ R/K ZAYIFLADI — YENİ GİRİŞ YAPMA", guvenlik["neden"], "warning"
+    elif kalite >= 68 and giris >= 55 and teyit >= 4 and risk_puani <= 55 and plan.risk_kazanc >= 1.40 and fiyat_bolgede and not engeller:
         durum, aksiyon, renk = "🟢 ALIM TEYİDİ GELDİ", "Kapanış ve fiyat bölgesi teyidi oluştu. Güncel kademeler kontrol edilerek kontrollü giriş değerlendirilebilir.", "success"
-    elif kalite >= 62 and giris >= 48 and teyit >= 3 and risk_puani <= 65 and plan.risk_kazanc >= 1.35 and not engeller:
+    elif kalite >= 62 and giris >= 48 and teyit >= 3 and risk_puani <= 65 and plan.risk_kazanc >= 1.40 and fiyat_bolgede and not engeller:
         durum, aksiyon, renk = "🟢 KONTROLLÜ ALIM ADAYI", "Dönüş güçleniyor. Fiyat alım bölgesindeyse küçük ve kademeli pozisyon değerlendirilebilir.", "success"
     elif "KAPANIŞ TEYİDİ" in asama or "DÖNÜŞ GELİŞİYOR" in asama:
         durum, aksiyon, renk = "🟡 KAPANIŞ TEYİDİ BEKLE", "Adaylık devam ediyor ancak giriş teyidi tamamlanmadı.", "warning"
@@ -1490,7 +1665,7 @@ def teyit_takip_anlik_degerlendir(hisse: str, piyasa: Dict[str, Any]) -> Optiona
         durum, aksiyon, renk = "🔴 ADAYLIK ZAYIFLADI", "Teknik yapı belirgin zayıfladı. Takipten çıkarılması değerlendirilebilir.", "error"
     else:
         durum, aksiyon, renk = "🟠 SADECE İZLE", "Henüz alım teyidi yok. Teknik puanların iyileşmesi beklenmeli.", "info"
-    return {"hisse": hisse, "plan": plan, "karar": karar, "durum": durum, "aksiyon": aksiyon, "renk": renk, "fiyat_bolgede": fiyat_bolgede, "kalite": kalite, "giris": giris, "teyit": teyit, "risk_puani": risk_puani}
+    return {"hisse": hisse, "plan": plan, "karar": karar, "durum": durum, "aksiyon": aksiyon, "renk": renk, "fiyat_bolgede": fiyat_bolgede, "kalite": kalite, "giris": giris, "teyit": teyit, "risk_puani": risk_puani, "giris_guvenligi": guvenlik}
 
 
 def portfoy_plan_anlik_goruntu(hisse: str, maliyet: float) -> Dict[str, Any]:
@@ -2335,6 +2510,16 @@ with t1:
     if sonuclar:
         piyasa_puani_goster = int(tarama_ozeti.get("piyasa_puani", 50))
         piyasa_durumu_goster = str(tarama_ozeti.get("piyasa_durumu", "BELİRSİZ"))
+        piyasa_canli_kontrol = {
+            "puan": piyasa_puani_goster,
+            "durum": piyasa_durumu_goster,
+            "momentum": 0.0,
+        }
+        # Taramanın kapanmış mum kararını ekranda gösterilmeden hemen önce canlı
+        # fiyat, alım bölgesi ve R/K ile yeniden güvenlik kontrolünden geçir.
+        sonuclar = tarama_sonuclarini_canli_guvenlikle_guncelle(
+            sonuclar, piyasa_canli_kontrol
+        )
         if piyasa_puani_goster < 42 or piyasa_durumu_goster == "RİSKLİ":
             st.error(f"🔴 Piyasa rejimi zayıf ({piyasa_puani_goster}/100). Yeni pozisyonlarda beklemek veya çok küçük pozisyon kullanmak daha uygundur.")
         elif piyasa_puani_goster < 55:
@@ -2348,6 +2533,13 @@ with t1:
             f"İlk %3: {dinamik_goster.get('kontrollu_esik', '-')} puan | "
             f"Alımı destekleyen: {dinamik_goster.get('guclu_adet', 0)} | "
             f"Kontrollü aday: {dinamik_goster.get('kontrollu_adet', 0)}"
+        )
+        canli_girise_uygun = sum(x.get("Alım Uygunluğu") == "EVET" for x in sonuclar)
+        bolgesi_kacan = sum("ALIM BÖLGESİ KAÇTI" in str(x.get("Karar", "")) for x in sonuclar)
+        st.caption(
+            f"Canlı giriş güvenliği — Yeni girişe uygun: {canli_girise_uygun} | "
+            f"Alım bölgesi kaçan: {bolgesi_kacan} | "
+            "Fiyatlar yaklaşık 25 saniyelik önbellekle doğrulanır."
         )
 
         if tarama_ozeti.get("esik_esnetildi"):
@@ -2387,23 +2579,45 @@ with t1:
         plan_dict = st.session_state.get("tarama_planlari", {}).get(secili)
         if plan_dict:
             p = TradePlan(**plan_dict)
+            secili_satir = next((x for x in sonuclar if x["Hisse"] == secili), {})
+            try:
+                secili_canli_fiyat = float(secili_satir.get("Fiyat", p.fiyat))
+            except (TypeError, ValueError):
+                secili_canli_fiyat = None
+            p = plan_canli_fiyatla_guncelle(p, secili_canli_fiyat)
             st.subheader(f"{p.ticker} işlem planı")
             kd = st.session_state.get("tarama_kararlari", {}).get(secili, {})
+            guvenlik = fiyat_guvenligi_degerlendir(
+                p,
+                str(kd.get("karar", secili_satir.get("Model Kararı", "-"))),
+                canli_dogrulandi=secili_canli_fiyat is not None,
+            )
             a, b, c, d, e, f = st.columns(6)
-            a.metric("Görünüm", kd.get("karar", "-"))
+            a.metric("Görünüm", secili_satir.get("Karar", kd.get("karar", "-")))
             b.metric("Kalite Skoru", f"{kd.get('kalite_skoru', 0)}/100 ({kd.get('kalite_sinifi', '-')})")
-            c.metric("Giriş Skoru", f"{kd.get('giris_skoru', 0)}/100")
-            d.metric("İşlem riski", kd.get("risk_profili", {}).get("gosterim", "-"))
+            c.metric("Giriş Skoru", f"{secili_satir.get('Giriş Skoru', kd.get('giris_skoru', 0))}/100")
+            d.metric("İşlem riski", secili_satir.get("Risk", kd.get("risk_profili", {}).get("gosterim", "-")))
             e.metric("Başarı olasılığı", f"%{kd.get('olasılık', 0)}")
             f.metric("Risk/Kazanç", f"1:{p.risk_kazanc:.2f}")
             st.info(
-                f"**{p.asama}**  |  Alım: **{p.alim_alt:.2f}–{p.alim_ust:.2f} TL**  |  "
+                f"**{p.asama}**  |  Canlı: **{p.fiyat:.2f} TL**  |  "
+                f"Alım: **{p.alim_alt:.2f}–{p.alim_ust:.2f} TL**  |  Maksimum alım: **{p.alim_ust:.2f} TL**  |  "
                 f"Hedef 1: **{p.hedef_1:.2f} TL**  |  Hedef 2: **{p.hedef_2:.2f} TL**  |  "
                 f"Stop: **{p.stop:.2f} TL**  |  Tahmini süre: **{p.tahmini_sure}**"
             )
-            if st.button(f"{p.ticker} işlemini günlüğe ekle", key=f"gunluk_{p.ticker}"):
+            if guvenlik["alim_uygun"]:
+                st.success(f"✅ Yeni giriş güvenliği uygun: {guvenlik['neden']}")
+            else:
+                st.warning(f"⛔ Yeni giriş güvenliği uygun değil: {guvenlik['neden']}")
+            if st.button(
+                f"{p.ticker} işlemini günlüğe ekle",
+                key=f"gunluk_{p.ticker}",
+                disabled=not guvenlik["alim_uygun"],
+            ):
                 islem_ac(p.ticker, p.fiyat, 1, "Tarama", int(kd.get("puan", 0)))
                 st.success("İşlem günlüğüne eklendi. Adet ve gerçek alış fiyatını İşlem Günlüğü sekmesinden düzenlemek yerine yeni kayıt açabilirsiniz.")
+            if not guvenlik["alim_uygun"]:
+                st.caption("Gerçekleşmiş bir işlemi kaydetmek için İşlem Günlüğü sekmesindeki gerçek fiyat/adet formunu kullanın.")
             if kd.get("analist_yorumu"):
                 st.info(f"**Analist değerlendirmesi:** {kd['analist_yorumu']}")
             if kd.get("nedenler"):
@@ -2447,7 +2661,7 @@ with t2:
                 continue
             plan, karar = sonuc["plan"], sonuc["karar"]
             onceki = str(kayit.get("son_durum", ""))
-            kayit.update({"son_durum": sonuc["durum"], "son_kontrol": datetime.now().strftime("%Y-%m-%d %H:%M"), "son_fiyat": float(plan.fiyat), "son_kalite": sonuc["kalite"], "son_giris": sonuc["giris"], "son_teyit": sonuc["teyit"]})
+            kayit.update({"son_durum": sonuc["durum"], "son_kontrol": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "son_fiyat": float(plan.fiyat), "son_kalite": sonuc["kalite"], "son_giris": sonuc["giris"], "son_teyit": sonuc["teyit"]})
             teyit_takip[h] = kayit
             if sonuc["durum"].startswith("🟢") and not onceki.startswith("🟢"):
                 mesaj = f"{h}: {sonuc['durum']} | {plan.fiyat:.2f} TL | Kalite/Giriş {sonuc['kalite']}/{sonuc['giris']}"
@@ -2455,7 +2669,7 @@ with t2:
                 telegram_bildirim_gonder(mesaj)
             ilk = float(kayit.get("ilk_fiyat", plan.fiyat) or plan.fiyat)
             degisim = 100 * (plan.fiyat / ilk - 1) if ilk else 0
-            takip_satirlari.append({"Hisse": h, "Durum": sonuc["durum"], "Güncel": f"{plan.fiyat:.2f} TL", "Takibe Alındı": f"{ilk:.2f} TL", "Takipten Sonra": f"%{degisim:+.2f}", "Son Güncelleme": kayit["son_kontrol"], "Kalite": sonuc["kalite"], "Giriş": sonuc["giris"], "Teyit": f"{sonuc['teyit']}/7", "Risk": karar.get("risk_profili", {}).get("gosterim", "-"), "Alım Bölgesi": f"{plan.alim_alt:.2f}–{plan.alim_ust:.2f}", "Bölgede": "EVET" if sonuc["fiyat_bolgede"] else "HAYIR", "Hedef 1": f"{plan.hedef_1:.2f}", "Stop": f"{plan.stop:.2f}"})
+            takip_satirlari.append({"Hisse": h, "Durum": sonuc["durum"], "Güncel": f"{plan.fiyat:.2f} TL", "Takibe Alındı": f"{ilk:.2f} TL", "Takipten Sonra": f"%{degisim:+.2f}", "Son Güncelleme": kayit["son_kontrol"], "Kalite": sonuc["kalite"], "Giriş": sonuc["giris"], "Teyit": f"{sonuc['teyit']}/7", "Risk": karar.get("risk_profili", {}).get("gosterim", "-"), "Alım Bölgesi": f"{plan.alim_alt:.2f}–{plan.alim_ust:.2f}", "Maksimum Alım": f"{plan.alim_ust:.2f}", "Bölgede": "EVET" if sonuc["fiyat_bolgede"] else "HAYIR", "Canlı R/K": f"1:{plan.risk_kazanc:.2f}", "Hedef 1": f"{plan.hedef_1:.2f}", "Stop": f"{plan.stop:.2f}"})
             takip_detaylari[h] = sonuc
         veri_kaydet(TEYIT_TAKIP_DOSYASI, teyit_takip)
         st.dataframe(pd.DataFrame(takip_satirlari), use_container_width=True, hide_index=True)
@@ -2477,7 +2691,7 @@ with t2:
             d.metric("Giriş", f"{det['giris']}/100")
             e.metric("Teyit", f"{det['teyit']}/7")
             f.metric("R/K", f"1:{plan.risk_kazanc:.2f}")
-            st.info(f"Alım bölgesi **{plan.alim_alt:.2f}–{plan.alim_ust:.2f} TL** | Hedef 1 **{plan.hedef_1:.2f} TL** | Stop **{plan.stop:.2f} TL**")
+            st.info(f"Alım bölgesi **{plan.alim_alt:.2f}–{plan.alim_ust:.2f} TL** | Maksimum alım **{plan.alim_ust:.2f} TL** | Canlı R/K **1:{plan.risk_kazanc:.2f}** | Hedef 1 **{plan.hedef_1:.2f} TL** | Stop **{plan.stop:.2f} TL**")
             if karar.get("nedenler"):
                 for gerekce in karar["nedenler"]: st.markdown(f"- {gerekce}")
             if st.button(f"{sec_takip} hissesini takipten çıkar", use_container_width=True):
@@ -2788,6 +3002,24 @@ Bu alan sanal deneme işlemleri için de kullanılabilir; ancak gerçek ve sanal
         gf = st.number_input("Gerçek alış fiyatı", min_value=0.01, step=0.01, value=float(guncel_fiyat_bul(gh) or 10.0), key="gunluk_fiyat")
     with g3:
         ga = st.number_input("Adet", min_value=0.01, step=1.0, value=1.0, key="gunluk_adet")
+    gunluk_sabit_plan = islem_plani_hesapla(gh)
+    gunluk_giris_guvenligi: Optional[Dict[str, Any]] = None
+    if gunluk_sabit_plan is not None:
+        gunluk_gercek_plan = plan_canli_fiyatla_guncelle(gunluk_sabit_plan, float(gf))
+        gunluk_model_karari = str(karar_motoru(gh, gunluk_gercek_plan, piyasa_rejimi_hesapla()).get("karar", "-"))
+        gunluk_giris_guvenligi = fiyat_guvenligi_degerlendir(
+            gunluk_gercek_plan, gunluk_model_karari, canli_dogrulandi=True
+        )
+        st.caption(
+            f"Gerçek alış kontrolü — Alım bölgesi: {gunluk_gercek_plan.alim_alt:.2f}–{gunluk_gercek_plan.alim_ust:.2f} TL | "
+            f"Maksimum alım: {gunluk_gercek_plan.alim_ust:.2f} TL | "
+            f"Gerçek fiyatla R/K: 1:{gunluk_gercek_plan.risk_kazanc:.2f}"
+        )
+        if not gunluk_giris_guvenligi["alim_uygun"]:
+            st.warning(
+                f"⚠️ Gerçek alış güvenlik uyarısı: {gunluk_giris_guvenligi['neden']} "
+                "İşlem zaten gerçekleştiyse kayıt yine eklenebilir; bu uyarı teknik fotoğrafa kaydedilir."
+            )
     if st.button("İşlemi günlüğe ekle", type="primary"):
         islem_ac(gh, gf, ga, "Manuel", 0)
         st.success("İşlem kaydedildi")
